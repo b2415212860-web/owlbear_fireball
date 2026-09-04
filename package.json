@@ -11,6 +11,7 @@
     "build": "tsc --noEmit && vite build --configLoader runner",
     "check": "tsc --noEmit",
     "test": "node --test src/geometry.test.ts",
+    "test:deployment": "npm run build && node --test tests/deployment.test.mjs",
     "preview": "vite preview --host 0.0.0.0 --configLoader runner"
   },
   "dependencies": {

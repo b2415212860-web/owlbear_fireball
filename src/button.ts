@@ -27,7 +27,7 @@ OBR.onReady(async () => {
     try {
       await OBR.modal.open({
         id: TARGET_MODAL_ID,
-        url: "/target.html",
+        url: `${import.meta.env.BASE_URL}target.html`,
         fullScreen: true,
         hideBackdrop: true,
         hidePaper: true,
@@ -38,4 +38,3 @@ OBR.onReady(async () => {
     }
   });
 });
-

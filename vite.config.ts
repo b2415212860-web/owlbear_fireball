@@ -5,6 +5,7 @@ import { defineConfig } from "vite";
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
+  base: "/fireball/",
   build: {
     rollupOptions: {
       input: {

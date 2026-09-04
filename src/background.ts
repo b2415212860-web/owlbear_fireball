@@ -51,7 +51,7 @@ async function openFloatingButton(): Promise<void> {
   const viewportWidth = await OBR.viewport.getWidth();
   await OBR.popover.open({
     id: BUTTON_POPOVER_ID,
-    url: "/button.html",
+    url: `${import.meta.env.BASE_URL}button.html`,
     width: BUTTON_WIDTH,
     height: BUTTON_HEIGHT,
     anchorReference: "POSITION",

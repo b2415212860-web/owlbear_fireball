@@ -4,6 +4,6 @@
   "manifest_version": 1,
   "description": "右上角一键瞄准并释放 20 英尺半径火球术，带飞行与爆炸特效。",
   "author": "Codex",
-  "icon": "/icon.svg",
-  "background_url": "/index.html"
+  "icon": "/fireball/icon.svg",
+  "background_url": "/fireball/index.html"
 }
