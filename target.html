@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>火球术瞄准</title>
+  </head>
+  <body class="target-page">
+    <div id="target-ring" class="target-ring" aria-hidden="true">
+      <span class="target-ring__crosshair"></span>
+      <span class="target-ring__label">20 英尺</span>
+    </div>
+
+    <div id="target-tip" class="target-tip" role="status">
+      <strong>移动鼠标选择爆炸中心</strong>
+      <span>点击地图释放 · Esc 取消</span>
+    </div>
+
+    <button id="cancel-button" class="cancel-button" type="button" aria-label="取消火球术">
+      <span class="cancel-button__orb" aria-hidden="true"></span>
+      <span><strong>火球术</strong><small>取消施法</small></span>
+    </button>
+
+    <script type="module" src="/src/target.ts"></script>
+  </body>
+</html>
