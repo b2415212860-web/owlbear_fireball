@@ -554,12 +554,12 @@ button {
   pointer-events: none;
   opacity: 0;
   background:
-    radial-gradient(circle at 50% 50%, rgba(255, 253, 224, 0.72), rgba(255, 104, 22, 0.23) 24%, transparent 68%);
+    radial-gradient(circle 280px at var(--impact-x, 50%) var(--impact-y, 50%), rgba(255, 240, 190, 0.30), rgba(255, 104, 22, 0.08) 28%, transparent 72%);
   mix-blend-mode: screen;
 }
 
 .demo-cinematic-flash--active {
-  animation: demo-cinematic-flash 620ms ease-out forwards;
+  animation: demo-cinematic-flash 240ms ease-out forwards;
 }
 
 .demo-fx-badge {

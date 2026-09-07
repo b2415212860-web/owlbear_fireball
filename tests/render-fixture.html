@@ -1,0 +1,37 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Fireball renderer regression fixture</title>
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#282b2e;color:white;font:13px monospace}body{background-image:linear-gradient(#ffffff0d 1px,transparent 1px),linear-gradient(90deg,#ffffff0d 1px,transparent 1px);background-size:40px 40px}#result{position:fixed;left:12px;top:12px;z-index:10;white-space:pre-wrap;pointer-events:none}#root{position:fixed;inset:0}</style>
+</head><body><div id="root"></div><output id="result">PREPARING</output>
+<script type="module">
+  // Development-only deterministic visual regression fixture; not a Vite build entry or extension page.
+  import { ThreeFireballPrototype } from '/src/performance-fx.ts';
+  const query = new URLSearchParams(location.search);
+  const seconds = Number(query.get('seconds') ?? '2.1');
+  const quality = query.get('quality') === 'low' ? 'low' : 'standard';
+  const radius = Number(query.get('radius') ?? '160');
+  if (query.get('light') === '1') document.body.style.backgroundColor = '#b5aa94';
+  const result = document.querySelector('#result');
+  class Capture extends ThreeFireballPrototype {
+    capture(time) {
+      const cast={ from:{x:innerWidth*.22,y:innerHeight*.62}, to:{x:innerWidth*.64,y:innerHeight*.50},radius };
+      this.active=cast;
+      try { this.resize(); this.draw(cast,time); } finally { this.active=null; }
+    }
+    stats() { return {calls:this.renderer.info.render.calls,triangles:this.renderer.info.render.triangles,width:this.renderer.domElement.width,height:this.renderer.domElement.height}; }
+    finishGPU() { this.renderer.getContext().finish(); }
+  }
+  try {
+    const fx = new Capture(document.querySelector('#root'),quality);
+    await fx.ready();
+    fx.capture(seconds); fx.finishGPU();
+    const times = [];
+    if(query.get('bench')==='1') {
+      for(let i=0;i<24;i++) {
+        const start=performance.now(); fx.capture(seconds+i*.001); fx.finishGPU(); times.push(performance.now()-start);
+      }
+    }
+    const sorted=[...times].sort((a,b)=>a-b);
+    result.textContent = 'READY '+JSON.stringify({seconds,quality,radius,...fx.stats(),samples:times.length,submitAndGPUms:times.length?{mean:times.reduce((a,b)=>a+b,0)/times.length,p95:sorted[Math.floor(sorted.length*.95)]}:undefined},null,2);
+    window.addEventListener('pagehide',()=>fx.dispose(),{once:true});
+  } catch(error) { result.textContent='ERROR '+String(error); console.error(error); }
+</script></body></html>

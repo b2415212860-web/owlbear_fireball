@@ -1,8 +1,8 @@
 {
   "name": "Fireball · 火球术",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "manifest_version": 1,
-  "description": "右上角一键瞄准并释放 20 英尺半径火球术，带飞行与爆炸特效。",
+  "description": "20 英尺原生瞄准，Three.js 圆形火球与尾焰、猛烈爆裂、冲击波及升腾的俯瞰体积蘑菇云；自动降档。",
   "author": "Codex",
   "icon": "/fireball/icon.svg",
   "background_url": "/fireball/index.html"

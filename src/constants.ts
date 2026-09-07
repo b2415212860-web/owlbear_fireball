@@ -7,4 +7,4 @@ export const FIREBALL_RADIUS_FEET = 20;
 export const BUTTON_WIDTH = 178;
 export const BUTTON_HEIGHT = 68;
 export const BUTTON_MARGIN = 18;
-
+export const BUTTON_LEFT_OFFSET = 100;

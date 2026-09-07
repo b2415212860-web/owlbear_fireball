@@ -6,12 +6,14 @@ const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   base: "/fireball/",
+  server: { cors: { origin: "https://www.owlbear.rodeo" } },
+  preview: { cors: { origin: "https://www.owlbear.rodeo" } },
   build: {
     rollupOptions: {
       input: {
         background: resolve(projectRoot, "index.html"),
         button: resolve(projectRoot, "button.html"),
-        target: resolve(projectRoot, "target.html"),
+        fx: resolve(projectRoot, "fx.html"),
       },
     },
   },

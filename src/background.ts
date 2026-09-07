@@ -1,93 +1,27 @@
 import OBR from "@owlbear-rodeo/sdk";
-import {
-  BUTTON_HEIGHT,
-  BUTTON_MARGIN,
-  BUTTON_POPOVER_ID,
-  BUTTON_WIDTH,
-  FX_CHANNEL,
-} from "./constants";
-import { playFireball } from "./effects";
-import { isFireballCastMessage } from "./types";
-
-let lastViewportWidth = 0;
-let buttonVisible = false;
-let repositioning = false;
+import { RELEASE, errorText } from "./protocol";
 
 if (!OBR.isAvailable) {
-  void import("./demo").then(({ mountDemo }) => mountDemo());
+  document.body.style.cssText = "margin:32px;background:#171419;color:#f7e6d0;font:16px/1.8 system-ui";
+  document.body.textContent = "火球术 · Owlbear 扩展。请在 Owlbear 房间中启用本扩展，再选中法师棋子，点击右上角的火球术按钮。安装入口：";
+  const manifest = document.createElement("a");
+  manifest.href = `${import.meta.env.BASE_URL}manifest.json`;
+  manifest.style.color = "#ffb45f";
+  manifest.textContent = new URL(manifest.href, location.href).href;
+  document.body.append(manifest);
 } else {
-  OBR.onReady(async () => {
-  OBR.broadcast.onMessage(FX_CHANNEL, (event) => {
-    if (isFireballCastMessage(event.data)) {
-      void playFireball(event.data).catch((error) => {
-        console.error("Unable to play fireball effect", error);
-      });
-    }
+  let started = false;
+  OBR.onReady(() => {
+    if (started) return;
+    started = true;
+    let step = "加载控制器";
+    void import("./controller").then(({ startController }) => {
+      step = "启动控制器";
+      return startController();
+    }).catch((error: unknown) => {
+      console.error(`Fireball initialization ${RELEASE} [${step}]`, error);
+      const detail = errorText(error).slice(0, 260);
+      void OBR.notification.show(`火球术 ${RELEASE} 初始化失败（${step}）：${detail}`, "ERROR").catch(console.warn);
+    });
   });
-
-  OBR.scene.onReadyChange((ready) => {
-    void syncFloatingButton(ready);
-  });
-
-  await syncFloatingButton(await OBR.scene.isReady());
-  window.setInterval(() => void keepButtonAnchored(), 800);
-  });
-}
-
-async function syncFloatingButton(sceneReady: boolean): Promise<void> {
-  if (sceneReady) {
-    await openFloatingButton();
-    return;
-  }
-
-  if (buttonVisible) {
-    await OBR.popover.close(BUTTON_POPOVER_ID);
-    buttonVisible = false;
-    lastViewportWidth = 0;
-  }
-}
-
-async function openFloatingButton(): Promise<void> {
-  const viewportWidth = await OBR.viewport.getWidth();
-  await OBR.popover.open({
-    id: BUTTON_POPOVER_ID,
-    url: `${import.meta.env.BASE_URL}button.html`,
-    width: BUTTON_WIDTH,
-    height: BUTTON_HEIGHT,
-    anchorReference: "POSITION",
-    anchorPosition: {
-      left: viewportWidth - BUTTON_MARGIN,
-      top: BUTTON_MARGIN,
-    },
-    anchorOrigin: {
-      horizontal: "RIGHT",
-      vertical: "TOP",
-    },
-    transformOrigin: {
-      horizontal: "RIGHT",
-      vertical: "TOP",
-    },
-    hidePaper: true,
-    disableClickAway: true,
-    marginThreshold: 0,
-  });
-
-  buttonVisible = true;
-  lastViewportWidth = viewportWidth;
-}
-
-async function keepButtonAnchored(): Promise<void> {
-  if (!buttonVisible || repositioning || !(await OBR.scene.isReady())) return;
-
-  const viewportWidth = await OBR.viewport.getWidth();
-  if (Math.abs(viewportWidth - lastViewportWidth) < 2) return;
-
-  repositioning = true;
-  try {
-    await OBR.popover.close(BUTTON_POPOVER_ID);
-    buttonVisible = false;
-    await openFloatingButton();
-  } finally {
-    repositioning = false;
-  }
 }

@@ -4,11 +4,12 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import {
+  EXPLOSION_SECONDS, EXPLOSION_VOLUME, VOLUME_NOISE,
+  fireVertexShader, fireFragmentShader,
+} from "./cinematic-shaders";
 
-export interface FxPoint {
-  x: number;
-  y: number;
-}
+export interface FxPoint { x: number; y: number }
 
 interface ActiveCast {
   from: THREE.Vector3;
@@ -21,213 +22,184 @@ interface ActiveCast {
 }
 
 const FLIGHT_SECONDS = 0.82;
-const EXPLOSION_SECONDS = 4.15;
-const SPARK_COUNT = 520;
-const DEBRIS_COUNT = 110;
-const SMOKE_COUNT = 380;
-const TRAIL_COUNT = 56;
+const SPARK_COUNT = 720;
+const DEBRIS_COUNT = 88;
+const DUST_COUNT = 64;
+const TRAIL_COUNT = 96;
 
-const ballisticVertexShader = `
+const planeVertexShader = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const particleVertexShader = `
 uniform float uTime;
-uniform float uGravity;
-attribute vec3 aVelocity;
-attribute float aDelay;
-attribute float aLife;
-attribute float aSize;
-attribute vec3 aColor;
-varying vec3 vColor;
-varying float vAlpha;
-
-void main() {
-  float rawAge = uTime - aDelay;
-  float age = max(rawAge, 0.0);
-  vec3 transformed = position + aVelocity * age;
-  transformed.y -= 0.5 * uGravity * age * age;
-
-  float alive = step(0.0, rawAge) * (1.0 - step(aLife, age));
-  vAlpha = alive * (1.0 - smoothstep(aLife * 0.54, aLife, age));
-  vColor = aColor;
-
-  vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
-  gl_Position = projectionMatrix * mvPosition;
-  gl_PointSize = aSize * (590.0 / max(1.0, -mvPosition.z));
-}
-`;
-
-const sparkFragmentShader = `
-varying vec3 vColor;
-varying float vAlpha;
-
-void main() {
-  vec2 uv = gl_PointCoord - 0.5;
-  float radius = length(uv);
-  float alpha = (1.0 - smoothstep(0.08, 0.5, radius)) * vAlpha;
-  float core = 1.0 - smoothstep(0.0, 0.18, radius);
-  gl_FragColor = vec4(mix(vColor, vec3(1.0, 0.96, 0.70), core), alpha);
-}
-`;
-
-const debrisFragmentShader = `
-varying vec3 vColor;
-varying float vAlpha;
-
-void main() {
-  vec2 edge = abs(gl_PointCoord - 0.5);
-  float shape = 1.0 - smoothstep(0.34, 0.49, max(edge.x * 0.82, edge.y));
-  float ember = 1.0 - smoothstep(0.16, 0.48, length(gl_PointCoord - vec2(0.32, 0.30)));
-  vec3 color = mix(vColor, vec3(0.95, 0.18, 0.015), ember * 0.48);
-  gl_FragColor = vec4(color, shape * vAlpha);
-}
-`;
-
-const smokeVertexShader = `
-uniform float uTime;
+uniform float uPixelRatio;
+uniform float uScale;
 attribute vec3 aVelocity;
 attribute float aDelay;
 attribute float aLife;
 attribute float aSize;
 attribute float aKind;
-attribute float aSeed;
 varying float vAlpha;
-varying float vSeed;
 varying float vHeat;
-varying vec3 vSmokeColor;
-
+varying float vKind;
+varying vec2 vDirection;
 void main() {
-  float rawAge = uTime - aDelay;
-  float age = max(rawAge, 0.0);
-  float normalizedAge = clamp(age / aLife, 0.0, 1.0);
-  vec3 transformed = position + aVelocity * age;
-
-  float turbulence = sin(age * 2.7 + aSeed * 31.0);
-  transformed.x += turbulence * (4.0 + 8.0 * aKind) * age;
-  transformed.y += cos(age * 2.1 + aSeed * 19.0) * (3.0 + 7.0 * aKind) * age;
-
-  // The map is viewed from above: XY is the ground plane and Z is cloud height.
-  // Rotating XY creates the rolling circular crown seen from a top-down camera.
-  float swirl = age * mix(1.18, 0.46, aKind) + (aSeed - 0.5) * 0.16;
-  float swirlCos = cos(swirl);
-  float swirlSin = sin(swirl);
-  transformed.xy = mat2(swirlCos, -swirlSin, swirlSin, swirlCos) * transformed.xy;
-  if (aKind > 0.5) {
-    transformed.z += 72.0 * (1.0 - exp(-age * 1.45));
-  }
-
-  float alive = step(0.0, rawAge) * (1.0 - step(aLife, age));
-  vAlpha = alive * smoothstep(0.0, 0.14, normalizedAge) *
-           (1.0 - smoothstep(0.62, 1.0, normalizedAge));
-  vSeed = aSeed;
-  vHeat = (1.0 - normalizedAge) * (1.0 - aKind * 0.38);
-  vSmokeColor = mix(vec3(0.32, 0.13, 0.045), vec3(0.17, 0.18, 0.19),
-                    smoothstep(0.08, 0.68, normalizedAge));
-
-  vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
-  gl_Position = projectionMatrix * mvPosition;
-  gl_PointSize = aSize * (1.0 + age * 0.34) * (650.0 / max(1.0, -mvPosition.z));
+  float age = max(0.0, uTime - aDelay);
+  float life = age / aLife;
+  float travel = (1.0 - exp(-age * 2.5)) / 2.5;
+  vec3 p = position + vec3(aVelocity.xy * travel, 0.0);
+  // XY is the map. Gravity acts along Z, not toward the bottom of the screen.
+  p.z = max(0.0, aVelocity.z * age - 145.0 * age * age);
+  vAlpha = step(aDelay, uTime) * (1.0 - smoothstep(0.4, 1.0, life));
+  vHeat = 1.0 - clamp(life, 0.0, 1.0);
+  vKind = aKind;
+  vDirection = normalize(aVelocity.xy + vec2(0.001));
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+  gl_PointSize = aSize * uPixelRatio * uScale * mix(0.45, 1.0, vHeat);
+  if (aKind > 1.5) gl_PointSize = aSize * uPixelRatio * uScale * (0.7 + age * 0.14);
 }
 `;
 
-const smokeFragmentShader = `
+const particleFragmentShader = `
 varying float vAlpha;
-varying float vSeed;
 varying float vHeat;
-varying vec3 vSmokeColor;
-
+varying float vKind;
+varying vec2 vDirection;
+${VOLUME_NOISE}
 void main() {
   vec2 uv = gl_PointCoord - 0.5;
-  float radius = length(uv);
-  float breakup = sin((uv.x + vSeed) * 23.0) * sin((uv.y - vSeed) * 19.0) * 0.035;
-  float cloud = 1.0 - smoothstep(0.27, 0.51, radius + breakup);
-  float innerGlow = 1.0 - smoothstep(0.0, 0.40, radius);
-  vec3 color = mix(vSmokeColor, vec3(0.92, 0.20, 0.025), innerGlow * vHeat * 0.34);
-  gl_FragColor = vec4(color, cloud * vAlpha * 0.58);
+  uv.y = -uv.y;
+  vec2 p = vec2(dot(uv, vDirection), dot(uv, vec2(-vDirection.y, vDirection.x)));
+  float streak = 1.0 - smoothstep(0.14, 0.5, length(p * vec2(1.1, 5.5)));
+  vec3 color = fireColor(vHeat * 0.52 + 0.15);
+  streak *= 0.38;
+  if (vKind > 0.5) {
+    streak = 1.0 - smoothstep(0.21, 0.46, length(p * vec2(1.0, 1.7)));
+    color = mix(vec3(0.08, 0.065, 0.05), fireColor(vHeat * 0.52), vHeat * 0.7);
+  }
+  if (vKind > 1.5) {
+    float breakup = fbm(vec3(uv * 6.0, vHeat * 2.0));
+    streak = (1.0 - smoothstep(0.15, 0.5, length(uv))) * smoothstep(0.15, 0.75, breakup) * 0.11;
+    color = vec3(0.20, 0.17, 0.13);
+  }
+  gl_FragColor = vec4(color, streak * vAlpha);
 }
 `;
 
-const fireVertexShader = `
+const trailVertexShader = `
+uniform float uPixelRatio;
+uniform float uFade;
+attribute float aAge;
+varying float vAlpha;
+varying float vHeat;
+void main() {
+  vHeat = 1.0 - aAge;
+  vAlpha = pow(vHeat, 1.5) * uFade * 0.52;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = (4.0 + 22.0 * vHeat) * uPixelRatio;
+}
+`;
+
+const trailFragmentShader = `
+varying float vAlpha;
+varying float vHeat;
+${VOLUME_NOISE}
+void main() {
+  float edge = 1.0 - smoothstep(0.05, 0.5, length(gl_PointCoord - 0.5));
+  gl_FragColor = vec4(fireColor(vHeat * 0.68 + 0.1), edge * vAlpha);
+}
+`;
+
+const shockFragmentShader = `
 uniform float uTime;
-varying float vPulse;
-
+varying vec2 vUv;
 void main() {
-  vec3 transformed = position;
-  float wave = sin(position.x * 0.19 + uTime * 13.0) *
-               sin(position.y * 0.17 - uTime * 9.0) * 0.11;
-  transformed *= 1.0 + wave;
-  vPulse = 0.82 + 0.18 * sin(uTime * 17.0 + position.z * 0.14);
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+  vec2 p = (vUv - 0.5) * 2.0;
+  float radius = length(p);
+  float angle = atan(p.y, p.x);
+  float front = 0.035 + 0.83 * (1.0 - exp(-uTime * 5.5));
+  float breakup = sin(angle * 13.0 + uTime * 3.0) * 0.007;
+  float ring = exp(-pow((radius - front - breakup) / 0.015, 2.0));
+  float dust = exp(-pow((radius - front + 0.035) / 0.075, 2.0));
+  float fade = (1.0 - smoothstep(0.08, 0.78, uTime)) * smoothstep(0.0, 0.035, uTime);
+  gl_FragColor = vec4(mix(vec3(0.65, 0.29, 0.09), vec3(2.0, 1.1, 0.44), ring),
+                      (ring * 0.40 + dust * 0.10) * fade);
 }
 `;
 
-const fireFragmentShader = `
-varying float vPulse;
-
+const lensFragmentShader = `
+uniform float uTime;
+varying vec2 vUv;
 void main() {
-  vec3 color = mix(vec3(1.0, 0.10, 0.005), vec3(1.0, 0.83, 0.16), vPulse);
-  gl_FragColor = vec4(color, 0.72);
+  vec2 p = vUv - 0.5;
+  float line = exp(-abs(p.y) * 150.0) * exp(-abs(p.x) * 8.0);
+  float flash = exp(-uTime * 15.0);
+  gl_FragColor = vec4(2.0, 0.72, 0.20, line * flash * 0.5);
 }
 `;
 
 const filmShader = {
   uniforms: {
-    tDiffuse: { value: null },
-    uTime: { value: 0 },
-    uStrength: { value: 0.028 },
+    tDiffuse: { value: null }, uTime: { value: 0 },
+    uCenter: { value: new THREE.Vector2() }, uImpulse: { value: 0 },
+    uResolution: { value: new THREE.Vector2(1, 1) },
   },
-  vertexShader: `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
+  vertexShader: planeVertexShader,
   fragmentShader: `
     uniform sampler2D tDiffuse;
     uniform float uTime;
-    uniform float uStrength;
+    uniform vec2 uCenter;
+    uniform float uImpulse;
+    uniform vec2 uResolution;
     varying vec2 vUv;
-
-    float random(vec2 p) {
-      return fract(sin(dot(p + uTime, vec2(12.9898, 78.233))) * 43758.5453);
-    }
-
     void main() {
-      vec4 source = texture2D(tDiffuse, vUv);
-      float grain = (random(vUv * vec2(1280.0, 720.0)) - 0.5) * uStrength;
-      source.rgb += grain * source.a;
-      gl_FragColor = source;
+      vec2 delta = (vUv - uCenter) * uResolution;
+      float r = length(delta);
+      float localMask = exp(-r * r / 68000.0);
+      vec2 displacement = delta / max(r, 1.0) / uResolution;
+      displacement *= sin(r * 0.09 - uTime * 22.0) * uImpulse * localMask * 2.0;
+      vec4 source = texture2D(tDiffuse, vUv + displacement);
+      float fringe = uImpulse * localMask * 0.65;
+      source.r = mix(source.r, texture2D(tDiffuse, vUv + displacement * 1.65).r, fringe);
+      source.b = mix(source.b, texture2D(tDiffuse, vUv - displacement * 0.4).b, fringe);
+      // Restore coverage after Bloom. Empty pixels stay transparent over the map.
+      float glow = max(source.r, max(source.g, source.b));
+      float alpha = max(source.a, clamp(glow * 0.42, 0.0, 0.9));
+      vec3 color = source.rgb / max(alpha, 0.001);
+      float grain = fract(sin(dot(vUv * uResolution + uTime, vec2(12.9898,78.233))) * 43758.5453);
+      color *= 1.0 + (grain - 0.5) * 0.024;
+      gl_FragColor = vec4(color, alpha);
     }
   `,
 };
 
 export class ThreeFireballPrototype {
-  readonly particleCount = SPARK_COUNT + DEBRIS_COUNT + SMOKE_COUNT + TRAIL_COUNT;
+  readonly particleCount = SPARK_COUNT + DEBRIS_COUNT + DUST_COUNT + TRAIL_COUNT;
   lastAverageFps = 0;
-
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(45, 1, 1, 3000);
+  private readonly camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 3000);
   private readonly composer: EffectComposer;
   private readonly bloomPass: UnrealBloomPass;
   private readonly filmPass: ShaderPass;
   private readonly fireball = new THREE.Group();
   private readonly explosion = new THREE.Group();
   private readonly fireMaterial: THREE.ShaderMaterial;
-  private readonly fireCoreMaterial: THREE.MeshBasicMaterial;
-  private readonly fireGlowMaterial: THREE.SpriteMaterial;
-  private readonly explosionCoreMaterial: THREE.MeshBasicMaterial;
-  private readonly explosionShellMaterial: THREE.MeshBasicMaterial;
-  private readonly explosionGlowMaterial: THREE.SpriteMaterial;
-  private readonly shockwaveMaterial: THREE.MeshBasicMaterial;
-  private readonly explosionCore: THREE.Mesh;
-  private readonly explosionShell: THREE.Mesh;
-  private readonly explosionGlow: THREE.Sprite;
-  private readonly shockwave: THREE.Mesh;
-  private readonly sparks: THREE.Points;
-  private readonly debris: THREE.Points;
-  private readonly smoke: THREE.Points;
+  private readonly cloudMaterial: THREE.ShaderMaterial;
+  private readonly shockMaterial: THREE.ShaderMaterial;
+  private readonly lensMaterial: THREE.ShaderMaterial;
+  private readonly glowMaterial: THREE.SpriteMaterial;
+  private readonly glow: THREE.Sprite;
+  private readonly particles: THREE.Points[];
   private readonly trail: THREE.Points;
+  private readonly trailMaterial: THREE.ShaderMaterial;
   private readonly trailPositions = new Float32Array(TRAIL_COUNT * 3);
-  private readonly trailHistory: THREE.Vector3[] = [];
+  private readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   private activeCast: ActiveCast | null = null;
   private animationFrame = 0;
   private width = 1;
@@ -235,162 +207,117 @@ export class ThreeFireballPrototype {
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({
-      alpha: true,
-      antialias: false,
-      powerPreference: "high-performance",
+      alpha: true, premultipliedAlpha: false, antialias: false, powerPreference: "high-performance",
     });
     this.renderer.setClearColor(0x000000, 0);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.4));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
     this.renderer.domElement.className = "three-fx-canvas";
     this.renderer.domElement.setAttribute("aria-hidden", "true");
     container.append(this.renderer.domElement);
-
     this.camera.position.z = 1000;
 
+    this.composer = new EffectComposer(this.renderer);
     const renderPass = new RenderPass(this.scene, this.camera);
     renderPass.clearAlpha = 0;
-    this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(renderPass);
-    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 1.35, 0.72, 0.08);
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.42, 0.42, 1.1);
+    // The stock Bloom blur emits opaque alpha. Preserve scene coverage when adding it.
+    this.bloomPass.blendMaterial.blending = THREE.CustomBlending;
+    this.bloomPass.blendMaterial.blendSrc = THREE.OneFactor;
+    this.bloomPass.blendMaterial.blendDst = THREE.OneFactor;
+    this.bloomPass.blendMaterial.blendSrcAlpha = THREE.ZeroFactor;
+    this.bloomPass.blendMaterial.blendDstAlpha = THREE.OneFactor;
     this.composer.addPass(this.bloomPass);
     this.filmPass = new ShaderPass(filmShader);
     this.composer.addPass(this.filmPass);
     this.composer.addPass(new OutputPass());
 
-    const glowTexture = createGlowTexture();
-
-    this.fireCoreMaterial = new THREE.MeshBasicMaterial({ color: 0xfff5a3 });
+    const texture = createGlowTexture();
     this.fireMaterial = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 } },
-      vertexShader: fireVertexShader,
-      fragmentShader: fireFragmentShader,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      uniforms: { uTime: { value: 0 } }, vertexShader: fireVertexShader,
+      fragmentShader: fireFragmentShader, transparent: true, depthWrite: false,
     });
-    this.fireGlowMaterial = new THREE.SpriteMaterial({
-      map: glowTexture,
-      color: 0xff4b08,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-
-    const fireCore = new THREE.Mesh(new THREE.IcosahedronGeometry(12, 3), this.fireCoreMaterial);
-    const fireShell = new THREE.Mesh(new THREE.IcosahedronGeometry(21, 4), this.fireMaterial);
-    const fireGlow = new THREE.Sprite(this.fireGlowMaterial);
-    fireGlow.scale.set(118, 118, 1);
-    this.fireball.add(fireGlow, fireShell, fireCore);
+    const fire = new THREE.Mesh(new THREE.IcosahedronGeometry(19, 4), this.fireMaterial);
+    const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: texture, color: 0xff4b0a, opacity: 0.4, transparent: true,
+      depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    halo.scale.set(96, 96, 1);
+    fire.renderOrder = 4;
+    this.fireball.add(halo, fire);
     this.fireball.visible = false;
     this.scene.add(this.fireball);
 
-    const trailGeometry = new THREE.BufferGeometry();
-    trailGeometry.setAttribute("position", new THREE.BufferAttribute(this.trailPositions, 3));
-    const trailMaterial = new THREE.PointsMaterial({
-      map: glowTexture,
-      color: 0xff5a08,
-      size: 28,
-      sizeAttenuation: true,
-      transparent: true,
-      opacity: 0.58,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(this.trailPositions, 3));
+    geometry.setAttribute("aAge", new THREE.BufferAttribute(
+      Float32Array.from({ length: TRAIL_COUNT }, (_, i) => i / TRAIL_COUNT), 1,
+    ));
+    this.trailMaterial = new THREE.ShaderMaterial({
+      uniforms: { uPixelRatio: { value: this.renderer.getPixelRatio() }, uFade: { value: 1 } },
+      vertexShader: trailVertexShader, fragmentShader: trailFragmentShader,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     });
-    this.trail = new THREE.Points(trailGeometry, trailMaterial);
-    this.trail.visible = false;
+    this.trail = new THREE.Points(geometry, this.trailMaterial);
     this.trail.frustumCulled = false;
+    this.trail.visible = false;
     this.scene.add(this.trail);
 
-    this.explosionCoreMaterial = new THREE.MeshBasicMaterial({
-      color: 0xfff8c9,
-      transparent: true,
+    this.cloudMaterial = makePlaneMaterial(`
+      uniform float uTime;
+      varying vec2 vUv;
+      ${EXPLOSION_VOLUME}
+      void main() { gl_FragColor = explosionVolume(vUv, uTime); }
+    `);
+    const cloud = new THREE.Mesh(new THREE.PlaneGeometry(360, 360), this.cloudMaterial);
+    cloud.renderOrder = 3;
+    this.shockMaterial = makePlaneMaterial(shockFragmentShader, true);
+    const shock = new THREE.Mesh(new THREE.PlaneGeometry(384, 384), this.shockMaterial);
+    shock.renderOrder = 1;
+    this.lensMaterial = makePlaneMaterial(lensFragmentShader, true);
+    const lens = new THREE.Mesh(new THREE.PlaneGeometry(820, 110), this.lensMaterial);
+    lens.renderOrder = 6;
+    this.glowMaterial = new THREE.SpriteMaterial({
+      map: texture, color: 0xff670e, transparent: true, depthWrite: false,
       blending: THREE.AdditiveBlending,
-      depthWrite: false,
     });
-    this.explosionShellMaterial = new THREE.MeshBasicMaterial({
-      color: 0xff3f04,
-      transparent: true,
-      opacity: 0.72,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      wireframe: true,
-    });
-    this.explosionGlowMaterial = new THREE.SpriteMaterial({
-      map: glowTexture,
-      color: 0xff4b08,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.shockwaveMaterial = new THREE.MeshBasicMaterial({
-      color: 0xffc85a,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-
-    this.explosionCore = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(20, 4),
-      this.explosionCoreMaterial,
-    );
-    this.explosionShell = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(38, 3),
-      this.explosionShellMaterial,
-    );
-    this.explosionGlow = new THREE.Sprite(this.explosionGlowMaterial);
-    this.explosionGlow.scale.set(220, 220, 1);
-    this.shockwave = new THREE.Mesh(
-      new THREE.RingGeometry(43, 48, 128),
-      this.shockwaveMaterial,
-    );
-    this.explosion.add(
-      this.explosionGlow,
-      this.explosionShell,
-      this.explosionCore,
-      this.shockwave,
-    );
+    this.glow = new THREE.Sprite(this.glowMaterial);
+    this.glow.renderOrder = 0;
+    this.explosion.add(this.glow, shock, cloud, lens);
+    this.particles = [
+      createParticles(SPARK_COUNT, 0, 0x51f15e),
+      createParticles(DEBRIS_COUNT, 1, 0xd3b74a),
+      createParticles(DUST_COUNT, 2, 0x9e3779),
+    ];
+    for (const points of this.particles) {
+      points.renderOrder = points === this.particles[2] ? 2 : 5;
+      this.explosion.add(points);
+    }
     this.explosion.visible = false;
     this.scene.add(this.explosion);
-
-    this.sparks = createBallisticPoints(SPARK_COUNT, false, 0x51f15e);
-    this.debris = createBallisticPoints(DEBRIS_COUNT, true, 0xd3b74a);
-    this.smoke = createSmokePoints(SMOKE_COUNT, 0x9e3779);
-    this.sparks.renderOrder = 5;
-    this.debris.renderOrder = 4;
-    this.smoke.renderOrder = 3;
-    this.explosion.add(this.smoke, this.debris, this.sparks);
-
     this.resize();
     window.addEventListener("resize", this.resize);
   }
 
-  play(from: FxPoint, to: FxPoint, onImpact: () => void): Promise<void> {
+  play(from: FxPoint, to: FxPoint, onImpact: () => void, radius = 208): Promise<void> {
     if (this.activeCast) return Promise.resolve();
-
-    const fromWorld = this.screenToWorld(from);
-    const toWorld = this.screenToWorld(to);
     this.fireball.visible = true;
     this.trail.visible = true;
+    this.trailMaterial.uniforms.uFade!.value = 1;
     this.explosion.visible = false;
-    this.trailHistory.length = 0;
-    this.fireball.position.copy(fromWorld);
-    this.setParticleTime(this.sparks, -10);
-    this.setParticleTime(this.debris, -10);
-    this.setParticleTime(this.smoke, -10);
-
+    this.explosion.scale.setScalar(radius / 160);
+    this.filmPass.uniforms.uCenter!.value.set(to.x / this.width, 1 - to.y / this.height);
+    this.filmPass.uniforms.uImpulse!.value = 0;
+    for (const points of this.particles) {
+      (points.material as THREE.ShaderMaterial).uniforms.uScale!.value = radius / 160;
+    }
     return new Promise((resolve) => {
       this.activeCast = {
-        from: fromWorld,
-        to: toWorld,
-        startedAt: performance.now(),
-        impacted: false,
-        onImpact,
-        resolve,
-        frameCount: 0,
+        from: this.screenToWorld(from), to: this.screenToWorld(to),
+        startedAt: performance.now(), impacted: false, onImpact, resolve, frameCount: 0,
       };
-      cancelAnimationFrame(this.animationFrame);
       this.animationFrame = requestAnimationFrame(this.animate);
     });
   }
@@ -398,256 +325,177 @@ export class ThreeFireballPrototype {
   private readonly animate = (now: number): void => {
     const cast = this.activeCast;
     if (!cast) return;
-    cast.frameCount += 1;
-
-    const totalTime = (now - cast.startedAt) / 1000;
-    this.filmPass.uniforms.uTime!.value = totalTime;
-
-    if (totalTime < FLIGHT_SECONDS) {
-      this.updateFlight(cast, totalTime);
+    cast.frameCount++;
+    const time = (now - cast.startedAt) / 1000;
+    this.filmPass.uniforms.uTime!.value = time;
+    if (time < FLIGHT_SECONDS) {
+      this.updateFlight(cast, time);
     } else {
-      if (!cast.impacted) this.beginExplosion(cast);
-      this.updateExplosion(totalTime - FLIGHT_SECONDS);
+      if (!cast.impacted) {
+        cast.impacted = true;
+        this.fireball.visible = false;
+        this.explosion.visible = true;
+        this.explosion.position.copy(cast.to);
+        cast.onImpact();
+      }
+      this.updateExplosion(time - FLIGHT_SECONDS);
     }
-
     this.composer.render();
-
-    if (totalTime >= FLIGHT_SECONDS + EXPLOSION_SECONDS) {
+    if (time >= FLIGHT_SECONDS + EXPLOSION_SECONDS) {
       this.finishCast(cast);
-      return;
+    } else {
+      this.animationFrame = requestAnimationFrame(this.animate);
     }
-
-    this.animationFrame = requestAnimationFrame(this.animate);
   };
 
-  private updateFlight(cast: ActiveCast, elapsed: number): void {
-    const t = Math.min(1, elapsed / FLIGHT_SECONDS);
-    const eased = t * t * t;
-    const midpoint = cast.from.clone().lerp(cast.to, 0.5);
-    midpoint.y += 82;
-    const inverse = 1 - eased;
-    const position = cast.from
-      .clone()
-      .multiplyScalar(inverse * inverse)
-      .add(midpoint.clone().multiplyScalar(2 * inverse * eased))
-      .add(cast.to.clone().multiplyScalar(eased * eased));
-
+  private updateFlight(cast: ActiveCast, time: number): void {
+    const position = flightPosition(cast, time);
+    const ahead = flightPosition(cast, Math.min(FLIGHT_SECONDS, time + 0.005));
     this.fireball.position.copy(position);
-    const pulse = 0.88 + Math.sin(elapsed * 24) * 0.09;
-    this.fireball.scale.setScalar(pulse);
-    this.fireMaterial.uniforms.uTime!.value = elapsed;
-    this.fireGlowMaterial.opacity = 0.74 + Math.sin(elapsed * 19) * 0.12;
-    this.bloomPass.strength = 1.15;
-
-    this.trailHistory.unshift(position.clone());
-    if (this.trailHistory.length > TRAIL_COUNT) this.trailHistory.pop();
-    for (let index = 0; index < TRAIL_COUNT; index += 1) {
-      const point = this.trailHistory[Math.min(index, this.trailHistory.length - 1)] ?? position;
-      const offset = index * 3;
-      this.trailPositions[offset] = point.x;
-      this.trailPositions[offset + 1] = point.y;
-      this.trailPositions[offset + 2] = point.z - index * 0.42;
+    this.fireball.rotation.z = Math.atan2(ahead.y - position.y, ahead.x - position.x);
+    this.fireball.scale.set(1.12 + time * 0.20, 0.89, 1.0);
+    this.fireMaterial.uniforms.uTime!.value = time;
+    this.bloomPass.strength = 0.42;
+    // Sample the trajectory in seconds so 30 Hz and 144 Hz have the same tail.
+    for (let index = 0; index < TRAIL_COUNT; index++) {
+      const age = index * 0.004;
+      const point = flightPosition(cast, Math.max(0, time - age));
+      const spread = age * 14;
+      this.trailPositions[index * 3] = point.x + Math.sin(index * 2.4 + time * 8) * spread;
+      this.trailPositions[index * 3 + 1] = point.y + Math.cos(index * 1.7 + time * 9) * spread;
+      this.trailPositions[index * 3 + 2] = point.z;
     }
-    const positionAttribute = this.trail.geometry.getAttribute("position") as THREE.BufferAttribute;
-    positionAttribute.needsUpdate = true;
-  }
-
-  private beginExplosion(cast: ActiveCast): void {
-    cast.impacted = true;
-    this.fireball.visible = false;
-    this.trail.visible = false;
-    this.explosion.visible = true;
-    this.explosion.position.copy(cast.to);
-    this.explosionCore.scale.setScalar(0.05);
-    this.explosionShell.scale.setScalar(0.05);
-    this.shockwave.scale.setScalar(0.08);
-    this.setParticleTime(this.sparks, 0);
-    this.setParticleTime(this.debris, 0);
-    this.setParticleTime(this.smoke, 0);
-    cast.onImpact();
+    this.trail.geometry.getAttribute("position").needsUpdate = true;
   }
 
   private updateExplosion(time: number): void {
-    this.setParticleTime(this.sparks, time);
-    this.setParticleTime(this.debris, time);
-    this.setParticleTime(this.smoke, time);
-
-    const flash = Math.max(0, 1 - time / 0.82);
-    const coreScale = 0.12 + 3.8 * (1 - Math.exp(-time * 6.4));
-    this.explosionCore.scale.setScalar(coreScale);
-    this.explosionShell.scale.setScalar(coreScale * (1.04 + Math.sin(time * 18) * 0.05));
-    this.explosionCoreMaterial.opacity = Math.max(0, 1 - time / 0.72);
-    this.explosionShellMaterial.opacity = Math.max(0, 0.85 - time / 1.18);
-    this.explosionGlowMaterial.opacity = Math.max(0, 1 - time / 1.08);
-    this.explosionGlow.scale.setScalar(210 + 330 * (1 - Math.exp(-time * 4.8)));
-
-    const shockScale = 0.08 + 4.7 * (1 - Math.exp(-time * 4.1));
-    this.shockwave.scale.setScalar(shockScale);
-    this.shockwaveMaterial.opacity = Math.max(0, 0.92 - time / 0.72);
-
-    const shake = Math.max(0, 1 - time / 0.56);
-    this.camera.position.x = Math.sin(time * 92) * 5.2 * shake;
-    this.camera.position.y = Math.cos(time * 73) * 3.8 * shake;
-    this.camera.position.z = 1000;
-    this.bloomPass.strength = 0.82 + flash * 1.72;
-    this.bloomPass.radius = 0.58 + flash * 0.20;
-    this.filmPass.uniforms.uStrength!.value = 0.018 + flash * 0.038;
+    for (const material of [this.cloudMaterial, this.shockMaterial, this.lensMaterial]) {
+      material.uniforms.uTime!.value = time;
+    }
+    for (const points of this.particles) {
+      (points.material as THREE.ShaderMaterial).uniforms.uTime!.value = time;
+    }
+    this.trailMaterial.uniforms.uFade!.value = Math.max(0, 1 - time / 0.22);
+    this.trail.visible = time < 0.22;
+    this.glow.scale.setScalar(160 + 220 * (1 - Math.exp(-time * 9)));
+    this.glowMaterial.opacity = 0.60 * Math.exp(-time * 3.8);
+    const impact = Math.exp(-time * 7);
+    this.bloomPass.strength = 0.28 + impact * 0.40;
+    this.filmPass.uniforms.uImpulse!.value = this.reducedMotion ? 0 : Math.exp(-time * 3.8);
+    if (this.reducedMotion) this.lensMaterial.uniforms.uTime!.value = 10;
   }
 
   private finishCast(cast: ActiveCast): void {
-    this.explosion.visible = false;
-    this.camera.position.set(0, 0, 1000);
-    this.scene.updateMatrixWorld();
-    this.composer.render();
-    const elapsedSeconds = Math.max(0.001, (performance.now() - cast.startedAt) / 1000);
-    this.lastAverageFps = Math.round(cast.frameCount / elapsedSeconds);
+    this.fireball.visible = this.explosion.visible = this.trail.visible = false;
+    this.renderer.setRenderTarget(null);
+    this.renderer.clear();
+    const elapsed = Math.max(0.001, (performance.now() - cast.startedAt) / 1000);
+    this.lastAverageFps = Math.round(cast.frameCount / elapsed);
     this.activeCast = null;
     cast.resolve();
   }
 
-  private setParticleTime(points: THREE.Points, time: number): void {
-    const material = points.material as THREE.ShaderMaterial;
-    material.uniforms.uTime!.value = time;
-  }
-
   private screenToWorld(point: FxPoint): THREE.Vector3 {
-    const distance = this.camera.position.z;
-    const visibleHeight = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * distance;
-    const visibleWidth = visibleHeight * this.camera.aspect;
-    return new THREE.Vector3(
-      (point.x / this.width - 0.5) * visibleWidth,
-      (0.5 - point.y / this.height) * visibleHeight,
-      0,
-    );
+    return new THREE.Vector3(point.x - this.width / 2, this.height / 2 - point.y, 0);
   }
 
   private readonly resize = (): void => {
+    const oldWidth = this.width;
+    const oldHeight = this.height;
     this.width = Math.max(1, window.innerWidth);
     this.height = Math.max(1, window.innerHeight);
-    this.camera.aspect = this.width / this.height;
+    this.camera.left = -this.width / 2;
+    this.camera.right = this.width / 2;
+    this.camera.top = this.height / 2;
+    this.camera.bottom = -this.height / 2;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(this.width, this.height, false);
     this.composer.setSize(this.width, this.height);
+    this.filmPass.uniforms.uResolution!.value.set(this.width, this.height);
+    if (this.activeCast) {
+      const delta = new THREE.Vector3((oldWidth - this.width) / 2, (this.height - oldHeight) / 2, 0);
+      this.activeCast.from.add(delta);
+      this.activeCast.to.add(delta);
+      this.explosion.position.copy(this.activeCast.to);
+      this.filmPass.uniforms.uCenter!.value.set(
+        this.activeCast.to.x / this.width + 0.5, this.activeCast.to.y / this.height + 0.5,
+      );
+    }
+    for (const points of this.particles) {
+      (points.material as THREE.ShaderMaterial).uniforms.uPixelRatio!.value = this.renderer.getPixelRatio();
+    }
   };
+
+  dispose(): void {
+    cancelAnimationFrame(this.animationFrame);
+    window.removeEventListener("resize", this.resize);
+    this.activeCast?.resolve();
+    this.activeCast = null;
+    const textures = new Set<THREE.Texture>();
+    this.scene.traverse((object) => {
+      if (object instanceof THREE.Mesh || object instanceof THREE.Points || object instanceof THREE.Sprite) {
+        if (!(object instanceof THREE.Sprite)) object.geometry.dispose();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials) {
+          if ("map" in material && material.map instanceof THREE.Texture) textures.add(material.map);
+          material.dispose();
+        }
+      }
+    });
+    textures.forEach((texture) => texture.dispose());
+    this.composer.passes.forEach((pass) => pass.dispose());
+    this.composer.dispose();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+  }
 }
 
-function createBallisticPoints(count: number, isDebris: boolean, seed: number): THREE.Points {
+function flightPosition(cast: ActiveCast, time: number): THREE.Vector3 {
+  const t = Math.min(1, time / FLIGHT_SECONDS);
+  const eased = t * t * (0.65 + 0.35 * t);
+  const position = cast.from.clone().lerp(cast.to, eased);
+  position.y += Math.sin(eased * Math.PI) * Math.min(46, cast.from.distanceTo(cast.to) * 0.08);
+  position.z = Math.sin(eased * Math.PI) * 24;
+  return position;
+}
+
+function makePlaneMaterial(fragmentShader: string, additive = false): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 } }, vertexShader: planeVertexShader, fragmentShader,
+    transparent: true, depthWrite: false, depthTest: false,
+    blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+  });
+}
+
+function createParticles(count: number, kind: number, seed: number): THREE.Points {
   const random = mulberry32(seed);
   const positions = new Float32Array(count * 3);
   const velocities = new Float32Array(count * 3);
   const delays = new Float32Array(count);
   const lives = new Float32Array(count);
   const sizes = new Float32Array(count);
-  const colors = new Float32Array(count * 3);
-
-  for (let index = 0; index < count; index += 1) {
+  const kinds = new Float32Array(count).fill(kind);
+  for (let i = 0; i < count; i++) {
     const angle = random() * Math.PI * 2;
-    const speed = isDebris ? 125 + random() * 185 : 175 + random() * 360;
-    const offset = index * 3;
-    velocities[offset] = Math.cos(angle) * speed;
-    velocities[offset + 1] = Math.sin(angle) * speed + (isDebris ? 48 : 72);
-    velocities[offset + 2] = (random() - 0.5) * speed * 0.52;
-    delays[index] = random() * (isDebris ? 0.16 : 0.12);
-    lives[index] = isDebris ? 1.05 + random() * 0.85 : 0.62 + random() * 0.84;
-    sizes[index] = isDebris ? 8 + random() * 13 : 7 + random() * 15;
-
-    const color = new THREE.Color();
-    if (isDebris) {
-      color.setRGB(0.10 + random() * 0.12, 0.035 + random() * 0.06, 0.012);
-    } else {
-      color.setHSL(0.035 + random() * 0.10, 1, 0.52 + random() * 0.30);
-    }
-    colors[offset] = color.r;
-    colors[offset + 1] = color.g;
-    colors[offset + 2] = color.b;
+    const speed = kind === 2 ? 130 + random() * 160 : 100 + Math.pow(random(), 0.55) * 290;
+    velocities[i * 3] = Math.cos(angle) * speed;
+    velocities[i * 3 + 1] = Math.sin(angle) * speed;
+    velocities[i * 3 + 2] = 35 + random() * 140;
+    delays[i] = random() * (kind === 2 ? 0.3 : 0.22);
+    lives[i] = kind === 2 ? 1.1 + random() * 0.9 : 0.45 + random() * (kind === 1 ? 1.25 : 1.8);
+    sizes[i] = kind === 2 ? 30 + random() * 46 : kind === 1 ? 3 + random() * 6 : 3 + random() * 10;
   }
-
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute("aVelocity", new THREE.BufferAttribute(velocities, 3));
-  geometry.setAttribute("aDelay", new THREE.BufferAttribute(delays, 1));
-  geometry.setAttribute("aLife", new THREE.BufferAttribute(lives, 1));
-  geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
-  geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
-
+  for (const [name, data, itemSize] of [
+    ["position", positions, 3], ["aVelocity", velocities, 3], ["aDelay", delays, 1],
+    ["aLife", lives, 1], ["aSize", sizes, 1], ["aKind", kinds, 1],
+  ] as const) geometry.setAttribute(name, new THREE.BufferAttribute(data, itemSize));
   const material = new THREE.ShaderMaterial({
-    uniforms: {
-      uTime: { value: -10 },
-      uGravity: { value: isDebris ? 330 : 255 },
-    },
-    vertexShader: ballisticVertexShader,
-    fragmentShader: isDebris ? debrisFragmentShader : sparkFragmentShader,
-    transparent: true,
-    depthWrite: false,
-    depthTest: false,
-    blending: isDebris ? THREE.NormalBlending : THREE.AdditiveBlending,
+    uniforms: { uTime: { value: -10 }, uPixelRatio: { value: 1 }, uScale: { value: 1 } },
+    vertexShader: particleVertexShader, fragmentShader: particleFragmentShader,
+    transparent: true, depthWrite: false, depthTest: false,
+    blending: kind === 0 ? THREE.AdditiveBlending : THREE.NormalBlending,
   });
-
-  const points = new THREE.Points(geometry, material);
-  points.frustumCulled = false;
-  return points;
-}
-
-function createSmokePoints(count: number, seed: number): THREE.Points {
-  const random = mulberry32(seed);
-  const positions = new Float32Array(count * 3);
-  const velocities = new Float32Array(count * 3);
-  const delays = new Float32Array(count);
-  const lives = new Float32Array(count);
-  const sizes = new Float32Array(count);
-  const kinds = new Float32Array(count);
-  const seeds = new Float32Array(count);
-  const stemCount = Math.floor(count * 0.36);
-
-  for (let index = 0; index < count; index += 1) {
-    const isCap = index >= stemCount;
-    const offset = index * 3;
-    const angle = random() * Math.PI * 2;
-    const radius = isCap ? 8 + random() * 14 : random() * 8;
-    positions[offset] = Math.cos(angle) * radius;
-    positions[offset + 1] = Math.sin(angle) * radius;
-    positions[offset + 2] = isCap ? 28 + random() * 38 : -24 + random() * 30;
-
-    if (isCap) {
-      const spread = 20 + random() * 38;
-      velocities[offset] = Math.cos(angle) * spread;
-      velocities[offset + 1] = Math.sin(angle) * spread;
-      velocities[offset + 2] = 26 + random() * 48;
-      delays[index] = 0.54 + random() * 0.78;
-      lives[index] = 2.35 + random() * 1.15;
-      sizes[index] = 44 + random() * 48;
-      kinds[index] = 1;
-    } else {
-      velocities[offset] = (random() - 0.5) * 22;
-      velocities[offset + 1] = (random() - 0.5) * 22;
-      velocities[offset + 2] = 88 + random() * 92;
-      delays[index] = 0.18 + random() * 1.04;
-      lives[index] = 2.0 + random() * 1.18;
-      sizes[index] = 36 + random() * 40;
-      kinds[index] = 0;
-    }
-    seeds[index] = random();
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute("aVelocity", new THREE.BufferAttribute(velocities, 3));
-  geometry.setAttribute("aDelay", new THREE.BufferAttribute(delays, 1));
-  geometry.setAttribute("aLife", new THREE.BufferAttribute(lives, 1));
-  geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
-  geometry.setAttribute("aKind", new THREE.BufferAttribute(kinds, 1));
-  geometry.setAttribute("aSeed", new THREE.BufferAttribute(seeds, 1));
-
-  const material = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: -10 } },
-    vertexShader: smokeVertexShader,
-    fragmentShader: smokeFragmentShader,
-    transparent: true,
-    depthWrite: false,
-    depthTest: false,
-    blending: THREE.NormalBlending,
-  });
-
   const points = new THREE.Points(geometry, material);
   points.frustumCulled = false;
   return points;
@@ -655,28 +503,24 @@ function createSmokePoints(count: number, seed: number): THREE.Points {
 
 function createGlowTexture(): THREE.CanvasTexture {
   const canvas = document.createElement("canvas");
-  canvas.width = 128;
-  canvas.height = 128;
+  canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas 2D is unavailable");
   const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
-  gradient.addColorStop(0, "rgba(255,255,235,1)");
-  gradient.addColorStop(0.12, "rgba(255,222,82,.98)");
-  gradient.addColorStop(0.36, "rgba(255,74,5,.72)");
-  gradient.addColorStop(1, "rgba(255,20,0,0)");
+  gradient.addColorStop(0, "rgba(255,255,255,1)");
+  gradient.addColorStop(0.15, "rgba(255,255,255,.7)");
+  gradient.addColorStop(0.45, "rgba(255,255,255,.15)");
+  gradient.addColorStop(1, "rgba(255,255,255,0)");
   context.fillStyle = gradient;
   context.fillRect(0, 0, 128, 128);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
+  return new THREE.CanvasTexture(canvas);
 }
 
 function mulberry32(seed: number): () => number {
   let state = seed >>> 0;
   return () => {
     state += 0x6d2b79f5;
-    let value = state;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
+    let value = Math.imul(state ^ (state >>> 15), state | 1);
     value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
     return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
   };
