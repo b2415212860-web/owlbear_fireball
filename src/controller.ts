@@ -21,6 +21,7 @@ interface Job {
 /** The hidden background controls SDK state only. All animation runs in fx.html. */
 export async function startController(): Promise<void> {
   const connection = await startupStep("读取玩家连接", () => OBR.player.getConnectionId());
+  const canConfigureResidue = await startupStep("读取玩家角色", async () => await OBR.player.getRole() === "GM");
   const ledger = new CastLedger();
   const jobs = new Map<string, Job>();
   const residue = new ResidueManager();
@@ -54,7 +55,7 @@ export async function startController(): Promise<void> {
   const local = (message: LocalMessage) => OBR.broadcast.sendMessage(LOCAL_CHANNEL, message, { destination: "LOCAL" });
   const notify = (message: string, variant: "INFO" | "ERROR" = "ERROR") => { void OBR.notification.show(message, variant).catch(console.warn); };
   const publish = (phase: Phase, hint: string) => {
-    status = { ...status, phase, hint, residueName: residue.name, residueBusy: pickingResidue };
+    status = { ...status, phase, hint, residueName: residue.name, residueBusy: pickingResidue, residueCanConfigure: canConfigureResidue };
     void local({ kind: "status", status }).catch(console.warn);
   };
   const report = (error: unknown) => {
@@ -63,6 +64,16 @@ export async function startController(): Promise<void> {
     publish("error", "未完成 · 点击重试 / 恢复");
     notify(errorText(error));
   };
+
+  try {
+    const initialRoomMetadata = await OBR.room.getMetadata();
+    const initialResidue = residue.syncRoomMetadata(initialRoomMetadata);
+    if (initialResidue === "invalid") notify("房间中的残留素材配置无效；已暂时保留此浏览器之前保存的模板。", "INFO");
+    else if (initialResidue === "volatile") notify("已取得 GM 的房间残留配置，但浏览器不允许持久保存。", "INFO");
+  } catch (error) {
+    // Residue sync is optional: a transient metadata failure must not disable casting.
+    notify(`暂时无法读取 GM 的房间残留配置，已使用此浏览器缓存：${errorText(error)}`, "INFO");
+  }
 
   const targeting = new NativeTargeting({
     onRequest: () => { void command("toggle").catch(report); },
@@ -274,21 +285,17 @@ export async function startController(): Promise<void> {
   async function configureResidue(action: "select" | "clear"): Promise<void> {
     if (stopped || !sceneAvailable || !sceneKey || pickingResidue || toggling || targetingRequested ||
         [...jobs.values()].some((job) => job.local)) return;
-    if (action === "clear") {
-      if (!residue.clear()) notify("已关闭本次会话的残留；浏览器未允许保存设置，刷新后请再次检查。", "INFO");
-      publish(status.phase, status.hint);
-      return;
-    }
+    if (!canConfigureResidue) { notify("只有 GM 可以设置或关闭全房间残留素材。", "INFO"); return; }
     const request = ++residueRequest;
     const generation = epoch;
     const current = () => !stopped && generation === epoch && request === residueRequest && sceneAvailable;
     pickingResidue = true;
     publish(status.phase, status.hint);
     try {
-      const result = await residue.select(current);
-      if (current() && result === "volatile") notify("素材已选中，但浏览器未允许保存；刷新后需要重新选择。", "INFO");
+      const result = action === "select" ? await residue.select(current) : await residue.clear(current);
+      if (current() && result === "volatile") notify("房间配置已更新，但此浏览器不允许持久保存本地缓存。", "INFO");
     } catch (error) {
-      if (current()) notify(`残留素材未更改：${errorText(error)}`);
+      if (current()) notify(`全房间残留素材未更改：${errorText(error)}`);
     } finally {
       if (current()) { pickingResidue = false; publish(status.phase, status.hint); }
     }
@@ -348,6 +355,14 @@ export async function startController(): Promise<void> {
     if (event.connectionId === connection || !sceneAvailable || !ledger.accept(event.data, sceneKey, event.connectionId)) return;
     void schedule(event.data, false).catch((error) => console.warn("Remote fireball", error));
   });
+  const offResidueMetadata = OBR.room.onMetadataChange((metadata) => {
+    if (stopped) return;
+    const result = residue.syncRoomMetadata(metadata);
+    if (result === "missing") return;
+    if (result === "invalid") notify("收到无效的房间残留配置；已保留此浏览器当前模板。", "INFO");
+    else if (result === "volatile") notify("已同步 GM 的房间残留配置，但此浏览器不允许持久保存。", "INFO");
+    publish(status.phase, status.hint);
+  });
   const offScene = OBR.scene.onReadyChange(() => { void loadScene().catch(report); });
   const offMetadata = OBR.scene.onMetadataChange((metadata) => {
     if (!sceneAvailable || status.phase === "loading") return;
@@ -406,7 +421,7 @@ export async function startController(): Promise<void> {
     sceneRequest++;
     if (anchorTimer !== undefined) clearInterval(anchorTimer);
     window.removeEventListener("pagehide", shutdown);
-    offLocal(); offRoom(); offScene(); offMetadata();
+    offLocal(); offRoom(); offResidueMetadata(); offScene(); offMetadata();
     void cancelRuntime().catch(console.warn);
     void targeting.dispose().catch(console.warn);
     void OBR.popover.close(BUTTON_POPOVER_ID).catch(console.warn);

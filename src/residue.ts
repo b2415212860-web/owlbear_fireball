@@ -2,6 +2,7 @@ import OBR, { buildImage, type ImageContent, type Vector2 } from "@owlbear-rodeo
 import { SCENE_KEY, type Cast } from "./protocol";
 
 export const RESIDUE_KEY = "com.codex.owlbear-fireball/residue";
+export const RESIDUE_ROOM_KEY = `${RESIDUE_KEY}/room-template-v1`;
 export interface ResidueTemplate {
   version: 1;
   name: string;
@@ -50,7 +51,27 @@ export class ResidueManager {
   get name(): string | undefined { return this.template?.name; }
   snapshot(): ResidueTemplate | undefined { return this.template ? structuredClone(this.template) : undefined; }
 
+  /**
+   * Room metadata is authoritative only when our key exists. This preserves a browser's
+   * cached template while a GM has not published a room setting yet. A deliberate null
+   * from the GM clears both the active template and the browser cache.
+   */
+  syncRoomMetadata(metadata: Record<string, unknown>): "missing" | "updated" | "cleared" | "invalid" | "volatile" {
+    if (!Object.prototype.hasOwnProperty.call(metadata, RESIDUE_ROOM_KEY)) return "missing";
+    const value = metadata[RESIDUE_ROOM_KEY];
+    if (value === null) {
+      this.template = undefined;
+      return this.persist() ? "cleared" : "volatile";
+    }
+    const template = readTemplate(value);
+    if (!template) return "invalid";
+    this.template = template;
+    return this.persist() ? "updated" : "volatile";
+  }
+
   async select(current: () => boolean): Promise<"cancelled" | "saved" | "volatile"> {
+    if (await OBR.player.getRole() !== "GM") throw new Error("只有 GM 可以设置全房间残留素材");
+    if (!current()) return "cancelled";
     const assets = await OBR.assets.downloadImages(false, undefined, "PROP");
     if (!current() || assets.length === 0) return "cancelled";
     const asset = assets[0]!;
@@ -59,11 +80,21 @@ export class ResidueManager {
       dpi: asset.grid.dpi, scale: asset.scale, rotation: asset.rotation,
     });
     if (!template) throw new Error("该素材的链接或尺寸不受支持，请选择一个 Props 图片或动画素材");
+    // Publish first. If the room write fails, every client keeps its previous template.
+    await OBR.room.setMetadata({ [RESIDUE_ROOM_KEY]: template });
+    if (!current()) return "cancelled";
     this.template = template;
     return this.persist() ? "saved" : "volatile";
   }
 
-  clear(): boolean { this.template = undefined; return this.persist(); }
+  async clear(current: () => boolean): Promise<"cancelled" | "saved" | "volatile"> {
+    if (await OBR.player.getRole() !== "GM") throw new Error("只有 GM 可以关闭全房间残留素材");
+    if (!current()) return "cancelled";
+    await OBR.room.setMetadata({ [RESIDUE_ROOM_KEY]: null });
+    if (!current()) return "cancelled";
+    this.template = undefined;
+    return this.persist() ? "saved" : "volatile";
+  }
 
   private persist(): boolean {
     try {

@@ -1,4 +1,4 @@
-export const RELEASE = "1.3.1";
+export const RELEASE = "1.4.0";
 export const CHANNEL = "com.codex.owlbear-fireball/v2/cast";
 export const LOCAL_CHANNEL = "com.codex.owlbear-fireball/v2/control";
 export const SCENE_KEY = "com.codex.owlbear-fireball/scene-id";
@@ -15,7 +15,15 @@ export interface Cast extends CastInput {
   sceneKey: string;
   seed: number;
 }
-export interface Status { phase: Phase; hint: string; quality: Quality; release: string; residueName?: string; residueBusy?: boolean }
+export interface Status {
+  phase: Phase;
+  hint: string;
+  quality: Quality;
+  release: string;
+  residueName?: string;
+  residueBusy?: boolean;
+  residueCanConfigure?: boolean;
+}
 export type LocalMessage =
   | { kind: "button-ready" }
   | { kind: "button-command"; action: "toggle" | "reset" }
@@ -54,7 +62,8 @@ export function isLocalMessage(value: unknown): value is LocalMessage {
     case "status": return record(value.status) && phases.includes(String(value.status.phase))
       && typeof value.status.hint === "string" && value.status.hint.length <= 500 && isQuality(value.status.quality) && id(value.status.release)
       && (value.status.residueName === undefined || (typeof value.status.residueName === "string" && value.status.residueName.length <= 120))
-      && (value.status.residueBusy === undefined || typeof value.status.residueBusy === "boolean");
+      && (value.status.residueBusy === undefined || typeof value.status.residueBusy === "boolean")
+      && (value.status.residueCanConfigure === undefined || typeof value.status.residueCanConfigure === "boolean");
     case "fx-ready": return id(value.instance) && (value.engine === "webgl" || value.engine === "canvas");
     case "fx-play": return id(value.instance) && isCast(value.cast) && isQuality(value.quality) && (value.slot === "primary" || value.slot === "secondary");
     case "fx-stage": return id(value.instance) && id(value.castId) && stages.includes(String(value.stage))

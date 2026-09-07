@@ -26,12 +26,19 @@ const fireSphere = {
   name: "Fire Sphere", type: "PROP", image: { width: 640, height: 480, mime: "video/webm", url: "https://assets.example/fire.webm" },
   grid: { dpi: 160, offset: { x: 3, y: 4 } }, scale: { x: 1.5, y: -1 }, rotation: 30,
 };
+const RESIDUE_KEY = "com.codex.owlbear-fireball/residue";
+const RESIDUE_ROOM_KEY = `${RESIDUE_KEY}/room-template-v1`;
+const fireSphereTemplate = {
+  version: 1, name: fireSphere.name, image: fireSphere.image,
+  dpi: fireSphere.grid.dpi, scale: fireSphere.scale, rotation: fireSphere.rotation,
+};
 
 async function createFixture(t, options = {}) {
   const modules = new Map();
   const channels = new Map();
   const sceneListeners = new Set();
   const metadataListeners = new Set();
+  const roomMetadataListeners = new Set();
   const pagehide = new Set();
   const timers = new Map();
   const intervals = new Map();
@@ -44,12 +51,14 @@ async function createFixture(t, options = {}) {
   const notifications = [];
   const items = new Map();
   const itemWrites = [];
+  const roomWrites = [];
   const storage = options.storage ?? new Map();
   const pickerCalls = [];
   let targeting;
   let nextTimer = 1;
   let ready = options.sceneReady ?? true;
   let metadata;
+  let roomMetadata = structuredClone(options.roomMetadata ?? {});
   let activeTargeting = false;
   let viewportWidth = 1440;
   let popoverVisible = false;
@@ -88,9 +97,23 @@ async function createFixture(t, options = {}) {
   }
 
   const OBR = {
-    room: { id: "room", getPermissions: async () => { await operation("room.getPermissions"); return options.permissions ?? ["PROP_CREATE"]; } },
+    room: {
+      id: "room",
+      getPermissions: async () => { await operation("room.getPermissions"); return options.permissions ?? ["PROP_CREATE"]; },
+      getMetadata: async () => { await operation("room.getMetadata"); return structuredClone(roomMetadata); },
+      setMetadata: async (value) => {
+        await operation("room.setMetadata");
+        roomWrites.push(structuredClone(value));
+        roomMetadata = { ...roomMetadata, ...structuredClone(value) };
+        for (const callback of roomMetadataListeners) callback(structuredClone(roomMetadata));
+      },
+      onMetadataChange(callback) { roomMetadataListeners.add(callback); return () => roomMetadataListeners.delete(callback); },
+    },
     assets: { downloadImages: async (...args) => { pickerCalls.push(args); await operation("assets.downloadImages"); return structuredClone(options.assets ?? [fireSphere]); } },
-    player: { getConnectionId: async () => { await operation("player.getConnectionId"); return "self"; }, getRole: async () => options.role ?? "GM" },
+    player: {
+      getConnectionId: async () => { await operation("player.getConnectionId"); return "self"; },
+      getRole: async () => { await operation("player.getRole"); return options.role ?? "GM"; },
+    },
     broadcast: {
       onMessage(channel, callback) {
         if (!channels.has(channel)) channels.set(channel, new Set());
@@ -196,8 +219,9 @@ async function createFixture(t, options = {}) {
   const instance = () => new URL(modals.at(-1).url, "https://test.invalid").searchParams.get("instance");
   return {
     protocol, outbound, operations, modals, popovers, notifications, timers, intervals, startupError,
-    items, itemWrites, pickerCalls, storage, residueModule: load("residue"),
-    get listenerCount() { return [...channels.values()].reduce((n, set) => n + set.size, 0) + sceneListeners.size + metadataListeners.size + pagehide.size; },
+    items, itemWrites, pickerCalls, storage, roomWrites, residueModule: load("residue"),
+    get roomMetadata() { return structuredClone(roomMetadata); },
+    get listenerCount() { return [...channels.values()].reduce((n, set) => n + set.size, 0) + sceneListeners.size + metadataListeners.size + roomMetadataListeners.size + pagehide.size; },
     get targeting() { return targeting; },
     get popoverVisible() { return popoverVisible; },
     get status() { return outbound.filter(({ data }) => data.kind === "status").at(-1)?.data.status; },
@@ -226,6 +250,10 @@ async function createFixture(t, options = {}) {
       metadata = { [protocol.SCENE_KEY]: id };
       ready = isReady;
       for (const callback of sceneListeners) callback(isReady);
+    },
+    changeRoomMetadata(value) {
+      roomMetadata = { ...roomMetadata, ...structuredClone(value) };
+      for (const callback of roomMetadataListeners) callback(structuredClone(roomMetadata));
     },
     fireTimeout(ms) {
       for (const [id, timer] of [...timers]) {
@@ -260,10 +288,12 @@ async function chooseResidue(f) {
   assert.equal(f.status.residueName, "Fire Sphere");
 }
 
-test("selected Props media is saved per room and emitted once, only after successful local playback", async (t) => {
+test("GM publishes selected Props media to the room, caches it locally, and emits it once after playback", async (t) => {
   const f = await createFixture(t);
   await chooseResidue(f);
   assert.deepEqual(f.pickerCalls, [[false, undefined, "PROP"]]);
+  assert.deepEqual(f.roomWrites, [{ [RESIDUE_ROOM_KEY]: fireSphereTemplate }]);
+  assert.deepEqual(JSON.parse(f.storage.get(`${f.residueModule.RESIDUE_KEY}/v1/room`)), fireSphereTemplate);
   assert.equal(f.itemWrites.length, 0, "choosing media must not add it to the scene");
   const play = await startLocalCast(f);
   assert.equal(f.itemWrites.length, 0);
@@ -287,8 +317,25 @@ test("selected Props media is saved per room and emitted once, only after succes
   assert.equal(item.metadata[f.residueModule.RESIDUE_KEY].castId, play.cast.castId);
   assert.equal(f.status.phase, "idle");
   assert.equal(f.roomCasts.length, 1, "residue creation has no extra room broadcast");
-  const reloaded = await createFixture(t, { storage: f.storage });
+  const reloaded = await createFixture(t, { storage: f.storage, roomMetadata: f.roomMetadata });
   assert.equal(reloaded.status.residueName, "Fire Sphere");
+});
+
+test("GM room updates overwrite and persist every browser cache while an absent key preserves local choice", async (t) => {
+  const storage = new Map([[`${RESIDUE_KEY}/v1/room`, JSON.stringify({ ...fireSphereTemplate, name: "Local Cache" })]]);
+  const f = await createFixture(t, { role: "PLAYER", storage });
+  assert.equal(f.status.residueName, "Local Cache", "an unconfigured room keeps this browser's cache");
+  const shared = { ...fireSphereTemplate, name: "GM Fire Sphere", rotation: 90 };
+  f.changeRoomMetadata({ [RESIDUE_ROOM_KEY]: shared });
+  await settle();
+  assert.equal(f.status.residueName, "GM Fire Sphere");
+  assert.deepEqual(JSON.parse(storage.get(`${f.residueModule.RESIDUE_KEY}/v1/room`)), shared);
+  const reloaded = await createFixture(t, { role: "PLAYER", storage, roomMetadata: f.roomMetadata });
+  assert.equal(reloaded.status.residueName, "GM Fire Sphere");
+  f.changeRoomMetadata({ [RESIDUE_ROOM_KEY]: null });
+  await settle();
+  assert.equal(f.status.residueName, undefined);
+  assert.equal(storage.get(`${f.residueModule.RESIDUE_KEY}/v1/room`), "null");
 });
 
 test("remote viewers, cancelled casts, errors and missing playback stages never generate Props", async (t) => {
@@ -329,7 +376,8 @@ test("unconfigured or cleared residue leaves the old fireball behavior and does 
   const third = await startLocalCast(f);
   f.stage(third, "impact"); f.stage(third, "finished"); await settle();
   assert.equal(f.itemWrites.length, 1);
-  const reloaded = await createFixture(t, { storage: f.storage });
+  assert.equal(f.roomMetadata[RESIDUE_ROOM_KEY], null);
+  const reloaded = await createFixture(t, { storage: f.storage, roomMetadata: f.roomMetadata });
   assert.equal(reloaded.status.residueName, undefined);
 });
 
@@ -343,6 +391,19 @@ test("picker cancellation retains the old choice and unsupported media never rep
   await chooseResidue(f);
   assert.match(f.notifications.at(-1).message, /不受支持/);
   assert.equal(f.status.residueBusy, false);
+});
+
+test("a failed GM room write keeps the previous shared template and browser cache", async (t) => {
+  const storage = new Map([[`${RESIDUE_KEY}/v1/room`, JSON.stringify({ ...fireSphereTemplate, name: "Previous" })]]);
+  const options = { storage, roomMetadata: { [RESIDUE_ROOM_KEY]: { ...fireSphereTemplate, name: "Previous" } } };
+  const f = await createFixture(t, options);
+  options.failAt = "room.setMetadata";
+  f.local({ kind: "residue-command", action: "select" });
+  await settle();
+  assert.equal(f.status.residueName, "Previous");
+  assert.equal(f.roomWrites.length, 0);
+  assert.equal(JSON.parse(storage.get(`${RESIDUE_KEY}/v1/room`)).name, "Previous");
+  assert.match(f.notifications.at(-1).message, /未更改/);
 });
 
 test("picker work is serialized, blocks casting, and stale results after reset are discarded", async (t) => {
@@ -361,7 +422,7 @@ test("picker work is serialized, blocks casting, and stale results after reset a
   assert.equal(f.storage.size, 0);
 });
 
-test("other clients and active casts cannot change the local residual template", async (t) => {
+test("other connections, players and active casts cannot publish a room residual template", async (t) => {
   const f = await createFixture(t);
   f.local({ kind: "residue-command", action: "select" }, "peer"); await settle();
   assert.equal(f.pickerCalls.length, 0);
@@ -373,14 +434,25 @@ test("other clients and active casts cannot change the local residual template",
   assert.equal(f.status.residueName, "Fire Sphere");
   f.stage(play, "impact"); f.stage(play, "finished"); await settle();
   assert.equal(f.itemWrites.length, 1);
+
+  const player = await createFixture(t, { role: "PLAYER", roomMetadata: f.roomMetadata });
+  player.local({ kind: "residue-command", action: "select" });
+  await settle();
+  assert.equal(player.pickerCalls.length, 0);
+  assert.equal(player.roomWrites.length, 0);
+  assert.equal(player.status.residueCanConfigure, false);
+  assert.match(player.notifications.at(-1).message, /只有 GM/);
 });
 
 test("residual creation respects Props permissions and reports failures without replaying the cast", async (t) => {
   for (const scenario of ["allowed", "denied", "write-failed"]) {
     await t.test(scenario, async (t) => {
-      const options = { role: "PLAYER", permissions: scenario === "denied" ? [] : ["PROP_CREATE"] };
+      const options = {
+        role: "PLAYER", permissions: scenario === "denied" ? [] : ["PROP_CREATE"],
+        roomMetadata: { [RESIDUE_ROOM_KEY]: fireSphereTemplate },
+      };
       const f = await createFixture(t, options);
-      await chooseResidue(f);
+      assert.equal(f.status.residueName, "Fire Sphere");
       const play = await startLocalCast(f);
       if (scenario === "write-failed") options.failAt = "items.addItems";
       f.stage(play, "impact"); f.stage(play, "finished"); await settle();
@@ -422,13 +494,24 @@ test("an existing cast item is not recreated or overwritten", async (t) => {
 test("blocked or corrupt browser storage cannot break fireball initialization", async (t) => {
   const f = await createFixture(t, { storageFailure: true });
   await chooseResidue(f);
-  assert.match(f.notifications.at(-1).message, /刷新后需要重新选择/);
+  assert.match(f.notifications.at(-1).message, /不允许持久保存/);
   const play = await startLocalCast(f);
   f.stage(play, "impact"); f.stage(play, "finished"); await settle();
   assert.equal(f.itemWrites.length, 1);
   const corrupted = await createFixture(t, { storage: new Map([[`${f.residueModule.RESIDUE_KEY}/v1/room`, "{bad json"]]) });
   assert.equal(corrupted.status.phase, "idle");
   assert.equal(corrupted.status.residueName, undefined);
+});
+
+test("malformed room metadata cannot replace a valid browser cache", async (t) => {
+  const storage = new Map([[`${RESIDUE_KEY}/v1/room`, JSON.stringify(fireSphereTemplate)]]);
+  const f = await createFixture(t, {
+    role: "PLAYER", storage,
+    roomMetadata: { [RESIDUE_ROOM_KEY]: { ...fireSphereTemplate, image: { ...fireSphere.image, url: "javascript:alert(1)" } } },
+  });
+  assert.equal(f.status.residueName, "Fire Sphere");
+  assert.match(f.notifications.at(-1).message, /配置无效/);
+  assert.deepEqual(JSON.parse(storage.get(`${f.residueModule.RESIDUE_KEY}/v1/room`)), fireSphereTemplate);
 });
 
 test("residue templates reject malformed data and preserve only supported media fields", async (t) => {
@@ -469,6 +552,7 @@ test("floating UI stays 100 pixels farther left without changing its top positio
 test("startup failures include the failed stage and release partially registered runtime state", async (t) => {
   for (const [failAt, stage] of [
     ["player.getConnectionId", "读取玩家连接"],
+    ["player.getRole", "读取玩家角色"],
     ["viewport.getWidth", "创建右上角按钮"],
     ["popover.open", "创建右上角按钮"],
     ["targeting.init", "注册瞄准工具"],
@@ -489,6 +573,15 @@ test("startup failures include the failed stage and release partially registered
       assert.equal(f.modals.length, count, "failed startup must not consume later room casts");
     });
   }
+});
+
+test("a room metadata read failure falls back to browser cache without disabling casting", async (t) => {
+  const storage = new Map([[`${RESIDUE_KEY}/v1/room`, JSON.stringify(fireSphereTemplate)]]);
+  const f = await createFixture(t, { storage, failAt: "room.getMetadata" });
+  assert.equal(f.startupError, undefined);
+  assert.equal(f.status.phase, "idle");
+  assert.equal(f.status.residueName, "Fire Sphere");
+  assert.match(f.notifications.at(-1).message, /浏览器缓存/);
 });
 
 test("starting without a scene waits without viewport, tool, button or metadata calls, then mounts on ready", async (t) => {

@@ -1,8 +1,8 @@
 {
   "name": "Fireball · 火球术",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "manifest_version": 1,
-  "description": "20 英尺原生瞄准，Three.js 圆形火球与尾焰、猛烈爆裂、冲击波及升腾的俯瞰体积蘑菇云；自动降档。",
+  "description": "20 英尺原生瞄准，Three.js 圆形火球、尾焰、爆裂、冲击波和俯瞰体积蘑菇云；支持 GM 发布全房间残留素材。",
   "author": "Codex",
   "icon": "/fireball/icon.svg",
   "background_url": "/fireball/index.html"

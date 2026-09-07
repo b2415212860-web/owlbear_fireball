@@ -28,13 +28,16 @@ async function connect(): Promise<void> {
     if (event.connectionId !== connection || !isLocalMessage(event.data) || event.data.kind !== "status") return;
     received = true;
     const status = event.data.status;
+    const canConfigureResidue = status.residueCanConfigure === true;
     button.disabled = !!status.residueBusy || ["loading", "preparing", "flying", "smoke"].includes(status.phase);
     const residueDisabled = !!status.residueBusy || ["loading", "aiming", "preparing", "flying", "smoke"].includes(status.phase);
-    residueSelect.disabled = residueDisabled;
-    residueClear.disabled = residueDisabled || !status.residueName;
-    residueSelect.textContent = status.residueBusy ? "正在选择…" : "选择残留素材";
-    residueName.textContent = status.residueName ? `残留：${status.residueName}` : "未设置 · 无残留";
-    residueName.title = status.residueName ? `${status.residueName} · 动画结束生成 · 手动删除` : "选择一次 Props 素材，后续施法自动生成";
+    residueSelect.disabled = residueDisabled || !canConfigureResidue;
+    residueClear.disabled = residueDisabled || !canConfigureResidue || !status.residueName;
+    residueSelect.textContent = status.residueBusy ? "正在发布…" : canConfigureResidue ? "GM 设置残留" : "由 GM 设置";
+    residueName.textContent = status.residueName ? `房间残留：${status.residueName}` : canConfigureResidue ? "未设置 · 无残留" : "GM 未设置 · 无残留";
+    residueName.title = status.residueName
+      ? `${status.residueName} · 全房间共用 · 动画结束生成 · 手动删除`
+      : canConfigureResidue ? "选择一次 Props 素材并发布给全房间" : "等待 GM 设置全房间残留素材";
     button.setAttribute("aria-pressed", String(status.phase === "aiming"));
     hint.textContent = status.hint;
     hint.title = status.hint;

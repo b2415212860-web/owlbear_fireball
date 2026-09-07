@@ -59,7 +59,7 @@ async function fixture(t) {
     element, outbound,
     status(fields = {}, sender = "self") {
       receiver({ connectionId: sender, data: { kind: "status", status: {
-        phase: "idle", hint: "选中棋子", quality: "auto", release: protocol.RELEASE, ...fields,
+        phase: "idle", hint: "选中棋子", quality: "auto", release: protocol.RELEASE, residueCanConfigure: true, ...fields,
       } } });
     },
     async click(id) { const target = element(id); if (!target.disabled) target.events.click(); await setImmediate(); },
@@ -76,7 +76,7 @@ test("residue controls send only local select/clear commands and safely display 
   assert.deepEqual(f.outbound.at(-1).data, { kind: "residue-command", action: "select" });
   assert.equal(f.outbound.at(-1).options.destination, "LOCAL");
   f.status({ residueName: "<img src=x onerror=alert(1)>" });
-  assert.equal(f.element("residue-name").textContent, "残留：<img src=x onerror=alert(1)>");
+  assert.equal(f.element("residue-name").textContent, "房间残留：<img src=x onerror=alert(1)>");
   assert.equal(f.element("residue-clear").disabled, false);
   await f.click("residue-clear");
   assert.deepEqual(f.outbound.at(-1).data, { kind: "residue-command", action: "clear" });
@@ -93,11 +93,24 @@ test("picker and playback states disable residue changes; picker keeps reset ava
   }
   f.status({ residueBusy: true, residueName: "Fire Sphere" });
   assert.equal(f.element("fireball-button").disabled, true);
-  assert.equal(f.element("residue-select").textContent, "正在选择…");
+  assert.equal(f.element("residue-select").textContent, "正在发布…");
   assert.equal(f.element("reset").disabled, false);
   f.status({ residueBusy: false, residueName: "Fire Sphere" });
   assert.equal(f.element("fireball-button").disabled, false);
   assert.equal(f.element("residue-select").disabled, false);
   f.status({ residueName: "Someone else's template" }, "peer");
-  assert.equal(f.element("residue-name").textContent, "残留：Fire Sphere");
+  assert.equal(f.element("residue-name").textContent, "房间残留：Fire Sphere");
+});
+
+test("players can use the shared template but cannot publish or clear it", async (t) => {
+  const f = await fixture(t);
+  f.status({ residueName: "Fire Sphere", residueCanConfigure: false });
+  assert.equal(f.element("residue-select").textContent, "由 GM 设置");
+  assert.equal(f.element("residue-select").disabled, true);
+  assert.equal(f.element("residue-clear").disabled, true);
+  assert.equal(f.element("residue-name").textContent, "房间残留：Fire Sphere");
+  const before = f.outbound.length;
+  await f.click("residue-select");
+  await f.click("residue-clear");
+  assert.equal(f.outbound.length, before);
 });
