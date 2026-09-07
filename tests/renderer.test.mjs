@@ -86,7 +86,7 @@ function createFixture(t, options = {}) {
       "requestAnimationFrame", "cancelAnimationFrame", compileModule(name))(
       (id) => {
         if (id === "three") return THREE;
-        if (id === "./cinematic-visuals" || id === "./volumetric-cloud") return load(id.slice(2));
+        if (["./cinematic-visuals", "./volumetric-cloud", "./explosion-profile"].includes(id)) return load(id.slice(2));
         throw new Error(`Unexpected renderer dependency: ${id}`);
       }, module, module.exports,
       document, window, { hardwareConcurrency: options.cores ?? 8, deviceMemory: options.memory ?? 8 },
@@ -167,6 +167,41 @@ test("Owlbear playback reserves 0.9 seconds of flight and 3.8 seconds of explosi
   assert.deepEqual(Object.fromEntries(Object.entries(f.timing).map(([key, value]) => [key, Math.round(value)])), {
     flight: 900, explosion: 3800, total: 4700,
   });
+});
+
+test("shared play seed survives projection updates and is replaced by the next cast", async (t) => {
+  const f = createFixture(t);
+  const first = f.renderer.play({ x: 100, y: 200 }, { x: 500, y: 400 }, () => {}, 160, undefined, 1234);
+  await settle();
+  assert.equal(f.renderer.active.seed, 1234);
+  f.renderer.setProjection({ x: 110, y: 210 }, { x: 510, y: 410 }, 180);
+  assert.equal(f.renderer.active.seed, 1234);
+  f.renderer.cancel();
+  await first;
+  const second = f.renderer.play({ x: 100, y: 200 }, { x: 500, y: 400 }, () => {}, 160, undefined, 0);
+  await settle();
+  assert.equal(f.renderer.active.seed, 0);
+  f.finishFrames();
+  await second;
+});
+
+test("Canvas fallback dissipates its existing tail after impact without extending past the target", async (t) => {
+  const f = createFixture(t);
+  const playing = f.play();
+  await settle();
+  f.frame();
+  f.advanceFrames(f.timing.flight + 80);
+  f.canvas.context.calls.length = 0;
+  f.frame(16);
+  const tail = f.canvas.context.calls.filter(({ method, args }) => method === "arc" && args[0] < 500);
+  assert.equal(tail.length, 7);
+  assert.ok(tail.every(({ args }) => args[0] >= 100 && args[1] < 400));
+  f.advanceFrames(240);
+  f.canvas.context.calls.length = 0;
+  f.frame(16);
+  assert.equal(f.canvas.context.calls.filter(({ method, args }) => method === "arc" && args[0] < 500).length, 0);
+  f.finishFrames();
+  await playing;
 });
 
 test("play acknowledges a successful first drawing, then impacts once and completes with no idle RAF", async (t) => {

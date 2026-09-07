@@ -1,4 +1,4 @@
-export const RELEASE = "1.3.0";
+export const RELEASE = "1.3.1";
 export const CHANNEL = "com.codex.owlbear-fireball/v2/cast";
 export const LOCAL_CHANNEL = "com.codex.owlbear-fireball/v2/control";
 export const SCENE_KEY = "com.codex.owlbear-fireball/scene-id";

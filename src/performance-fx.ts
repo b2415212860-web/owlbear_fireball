@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { sphereVertex, sphereFragment, makeFireCorona, makeFlameTrail, makeDetonation, makePressureWave } from "./cinematic-visuals";
 import { VolumetricCloud } from "./volumetric-cloud";
+import { createExplosionProfile, explosionLayers, normalizeEffectSeed, TAIL_DISSIPATION_SECONDS } from "./explosion-profile";
 
 export interface FxPoint { x: number; y: number }
 export type FxQuality = "auto" | "standard" | "low";
@@ -10,7 +11,7 @@ export interface FxRenderer {
   readonly currentQuality: "standard" | "low";
   lastAverageFps: number;
   ready(): Promise<void>;
-  play(from: FxPoint, to: FxPoint, onImpact: () => void, radius?: number, onStarted?: () => void): Promise<void>;
+  play(from: FxPoint, to: FxPoint, onImpact: () => void, radius?: number, onStarted?: () => void, seed?: number): Promise<void>;
   setProjection(from: FxPoint, to: FxPoint, radius: number): void;
   setQuality(quality: FxQuality): void;
   cancel(): void;
@@ -21,6 +22,7 @@ interface ActiveCast {
   from: FxPoint;
   to: FxPoint;
   radius: number;
+  seed: number;
   startedAt: number;
   previousFrame: number;
   frames: number;
@@ -98,7 +100,7 @@ abstract class FireballRendererBase implements FxRenderer {
     if (Math.abs(desiredScale - this.resolutionScale) / this.resolutionScale > .08) this.resize();
   }
 
-  play(from: FxPoint, to: FxPoint, onImpact: () => void, radius = 160, onStarted?: () => void): Promise<void> {
+  play(from: FxPoint, to: FxPoint, onImpact: () => void, radius = 160, onStarted?: () => void, seed = 0xf1b411): Promise<void> {
     try {
       this.checkAvailable();
       validateProjection(from, to, radius);
@@ -108,7 +110,7 @@ abstract class FireballRendererBase implements FxRenderer {
 
     return new Promise<void>((resolve, reject) => {
       const cast: ActiveCast = {
-        from: { ...from }, to: { ...to }, radius, startedAt: 0, previousFrame: 0,
+        from: { ...from }, to: { ...to }, radius, seed: normalizeEffectSeed(seed), startedAt: 0, previousFrame: 0,
         frames: 0, slowFrames: 0, impacted: false, onImpact, onStarted, resolve, reject,
       };
       this.active = cast;
@@ -221,25 +223,39 @@ const sparkVertex = `
 uniform float uTime;
 uniform float uPixelScale;
 uniform float uRadiusScale;
+uniform vec2 uSpin;
 attribute vec3 aVelocity;
 attribute float aLife;
 attribute float aSize;
+attribute float aKind;
 varying float vHeat;
+varying float vKind;
+varying float vVisibility;
 void main() {
   float age = max(0.0, uTime);
+  vKind = aKind;
   vHeat = max(0.0, 1.0 - age / aLife);
-  float travel = (1.0 - exp(-age * 2.5)) / 2.5;
+  float drag = mix(2.8, 4.3, aKind);
+  float travel = (1.0 - exp(-age * drag)) / drag;
   vec3 p = aVelocity * travel;
-  p.z = max(0.0, aVelocity.z * age - 75.0 * age * age);
+  p.xy=mat2(uSpin.x,uSpin.y,-uSpin.y,uSpin.x)*p.xy;
+  p.z = max(0.0, aVelocity.z * age - 85.0 * age * age);
+  // Overhead projection reveals a small airborne arc without increasing the footprint.
+  p.y += p.z * .20;
+  vVisibility=mix(1.,.22,smoothstep(.20,.60,age)*(1.-smoothstep(45.,95.,length(p.xy))));
   gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   gl_PointSize = clamp(aSize * uPixelScale * uRadiusScale * (0.45 + vHeat), 1.0, 14.0);
 }`;
 const sparkFragment = `
 varying float vHeat;
+varying float vKind;
+varying float vVisibility;
 void main() {
   float r = length(gl_PointCoord - 0.5);
-  float alpha = (1.0 - smoothstep(0.05, 0.5, r)) * smoothstep(0.0, 0.35, vHeat);
-  gl_FragColor = vec4(mix(vec3(1.0, 0.13, 0.01), vec3(1.0, 0.9, 0.48), vHeat), alpha);
+  float alpha = (1.0 - smoothstep(mix(.05,.23,vKind), .5, r)) * smoothstep(0.0, 0.25, vHeat)*vVisibility;
+  vec3 hot=mix(vec3(.95,.09,.003),vec3(1.,.96,.72),vHeat);
+  vec3 ember=mix(vec3(.075,.047,.034),hot,smoothstep(.25,.9,vHeat));
+  gl_FragColor=vec4(mix(hot,ember,vKind),alpha);
 }`;
 
 /** A spherical fireball, batched flowing trail and bounded local volumetric explosion. */
@@ -259,6 +275,7 @@ export class ThreeFireballPrototype extends FireballRendererBase {
   private corona!: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
   private glowTexture!: THREE.CanvasTexture;
   private warmup: Promise<void> | null = null;
+  private visualSeed: number | undefined;
 
   constructor(container: HTMLElement, quality: FxQuality = "auto") {
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: false, powerPreference: "default" });
@@ -353,6 +370,28 @@ export class ThreeFireballPrototype extends FireballRendererBase {
     const tx = cast.to.x - this.width / 2;
     const ty = this.height / 2 - cast.to.y;
     const orbSize = Math.max(3, cast.radius * 0.125);
+    const seed = normalizeEffectSeed(cast.seed);
+    if (this.visualSeed !== seed) {
+      this.visualSeed = seed;
+      const profile = createExplosionProfile(seed);
+      this.smoke.setProfile(profile);
+      for (const mesh of [this.trail, this.shock, this.burst]) {
+        (mesh.material.uniforms.uSeed!.value as THREE.Vector3).set(...profile.offset);
+      }
+      this.sparks.material.uniforms.uSpin!.value.set(Math.cos(profile.rotation), Math.sin(profile.rotation));
+    }
+    const age = seconds - FLIGHT_SECONDS;
+    const layers = explosionLayers(age);
+    this.trail.visible = layers.trail;
+    if (layers.trail) {
+      const uniforms = this.trail.material.uniforms;
+      uniforms.uFrom!.value.set(fx, fy);
+      uniforms.uTo!.value.set(tx, ty);
+      uniforms.uProgress!.value = Math.min(1, seconds / FLIGHT_SECONDS);
+      uniforms.uTime!.value = seconds;
+      uniforms.uSize!.value = orbSize;
+      uniforms.uAfterImpact!.value = Math.max(0, age);
+    }
     if (seconds < FLIGHT_SECONDS) {
       const progress = seconds / FLIGHT_SECONDS;
       const eased = easeFlight(progress);
@@ -365,15 +404,8 @@ export class ThreeFireballPrototype extends FireballRendererBase {
       this.fire.rotation.y = seconds * 2.2;
       this.fire.material.uniforms.uTime!.value = seconds;
       this.corona.material.uniforms.uTime!.value = seconds;
-      const uniforms = this.trail.material.uniforms;
-      uniforms.uFrom!.value.set(fx, fy);
-      uniforms.uTo!.value.set(tx, ty);
-      uniforms.uProgress!.value = progress;
-      uniforms.uTime!.value = seconds;
-      uniforms.uSize!.value = orbSize;
     } else {
-      const age = seconds - FLIGHT_SECONDS;
-      this.fireball.visible = this.trail.visible = false;
+      this.fireball.visible = false;
       this.explosion.visible = true;
       this.explosion.position.set(tx, ty, 0);
       this.explosion.scale.setScalar(radiusScale);
@@ -384,9 +416,9 @@ export class ThreeFireballPrototype extends FireballRendererBase {
       this.shock.material.uniforms.uReduced!.value = this.reducedMotion ? 1 : 0;
       this.burst.material.uniforms.uTime!.value = age;
       this.burst.material.uniforms.uReduced!.value = this.reducedMotion ? 1 : 0;
-      this.burst.visible = age < .65;
-      this.shock.visible = age < 1.1;
-      this.sparks.visible = age < 1.7;
+      this.burst.visible = layers.burst;
+      this.shock.visible = layers.dust;
+      this.sparks.visible = layers.embers;
     }
     this.renderer.render(this.scene, this.camera);
   }
@@ -447,36 +479,42 @@ export class CanvasFireballFallback extends FireballRendererBase {
   protected draw(cast: ActiveCast, seconds: number): void {
     const ctx = this.context;
     const radius = cast.radius;
+    const age = seconds - FLIGHT_SECONDS;
+    const seedAngle = normalizeEffectSeed(Math.imul(cast.seed, 0x9e3779b1)) / 4294967296 * Math.PI * 2;
     this.clearSurface();
     ctx.setTransform(this.resolutionScale, 0, 0, this.resolutionScale, 0, 0);
-    if (seconds < FLIGHT_SECONDS) {
-      const progress = seconds / FLIGHT_SECONDS;
-      for (let i = 7; i >= 0; i--) {
+    if (age < TAIL_DISSIPATION_SECONDS) {
+      const progress = Math.min(1, seconds / FLIGHT_SECONDS);
+      const tailFade = Math.max(0, 1 - Math.max(0, age) / TAIL_DISSIPATION_SECONDS);
+      for (let i = 7; i >= (age < 0 ? 0 : 1); i--) {
         const p = easeFlight(Math.max(0, progress - i * 0.025));
         const x = cast.from.x + (cast.to.x - cast.from.x) * p;
         const y = cast.from.y + (cast.to.y - cast.from.y) * p;
-        ctx.globalAlpha = (1 - i / 8) * 0.85;
+        ctx.globalAlpha = (1 - i / 8) * 0.85 * tailFade;
         ctx.fillStyle = i === 0 ? "#ffe394" : "#ff6918";
         ctx.beginPath();
         ctx.arc(x, y, Math.max(2, radius * 0.085 * (1 - i / 11)), 0, Math.PI * 2);
         ctx.fill();
       }
-    } else {
-      const age = seconds - FLIGHT_SECONDS;
+    }
+    if (age >= 0) {
       const expansion = 1 - Math.exp(-age * 5);
-      if (!this.reducedMotion) {
+      if (!this.reducedMotion && explosionLayers(age).dust) {
         ctx.globalAlpha = Math.max(0, 1 - age / 0.85) * 0.55;
         ctx.strokeStyle = "#d8b793";
         ctx.lineWidth = Math.max(1, radius * 0.02);
-        ctx.beginPath();
-        ctx.arc(cast.to.x, cast.to.y, radius * expansion * 0.9, 0, Math.PI * 2);
-        ctx.stroke();
+        for (let i = 0; i < 6; i++) {
+          const angle = seedAngle + i * 1.047;
+          ctx.beginPath();
+          ctx.arc(cast.to.x, cast.to.y, radius * expansion * (0.86 + Math.sin(i + seedAngle) * .035), angle, angle + .40 + (i % 3) * .10);
+          ctx.stroke();
+        }
       }
       for (let i = 0; i < 5; i++) {
-        const theta = i * 2.399;
+        const theta = i * 2.399 + seedAngle;
         const x = cast.to.x + Math.cos(theta) * radius * 0.26 * expansion;
         const y = cast.to.y + Math.sin(theta) * radius * 0.26 * expansion;
-        const size = radius * (0.22 + 0.43 * expansion);
+        const size = radius * (0.22 + 0.43 * expansion) * (.86 + Math.sin(theta * 3.7) * .14);
         ctx.globalAlpha = Math.min(1, age * 6) * Math.max(0, 1 - age / 3.65) * 0.75;
         ctx.drawImage(this.puff, x - size / 2, y - size / 2, size, size);
       }
@@ -486,7 +524,7 @@ export class CanvasFireballFallback extends FireballRendererBase {
       ctx.arc(cast.to.x, cast.to.y, radius * (0.08 + expansion * 0.32), 0, Math.PI * 2);
       ctx.fill();
       for (let i = 0; i < this.particleCount; i++) {
-        const angle = i * 2.399;
+        const angle = i * 2.399 + seedAngle;
         const reach = radius * expansion * (0.32 + (i % 7) * 0.075);
         ctx.globalAlpha = Math.max(0, 1 - age / (0.7 + (i % 5) * 0.15));
         ctx.fillStyle = i % 3 === 0 ? "#ffd479" : "#ee681c";
@@ -509,24 +547,29 @@ function makeSparks(): THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial> 
   const velocity = new Float32Array(count * 3);
   const life = new Float32Array(count);
   const size = new Float32Array(count);
+  const kind = new Float32Array(count);
   for (let i = 0; i < count; i++) {
+    const heavy = i % 4 === 0;
     const angle = random() * Math.PI * 2;
-    const speed = 70 + random() * 280;
+    const speedSample = random();
+    const speed = heavy ? 80 + speedSample * 300 : 35 + speedSample * speedSample * 325;
     velocity[i * 3] = Math.cos(angle) * speed;
     velocity[i * 3 + 1] = Math.sin(angle) * speed;
-    velocity[i * 3 + 2] = random() * 100;
-    life[i] = 0.35 + random() * 1.3;
-    size[i] = 1.3 + random() * 3;
+    velocity[i * 3 + 2] = (heavy ? 45 : 15) + random() * 75;
+    life[i] = heavy ? 1.25 + random() * .90 : .25 + random() * .75;
+    size[i] = heavy ? 2.5 + random() * 2.5 : 1.0 + random() * 1.8;
+    kind[i] = heavy ? 1 : 0;
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
   geometry.setAttribute("aVelocity", new THREE.BufferAttribute(velocity, 3));
   geometry.setAttribute("aLife", new THREE.BufferAttribute(life, 1));
   geometry.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
+  geometry.setAttribute("aKind", new THREE.BufferAttribute(kind, 1));
   const points = new THREE.Points(geometry, new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uPixelScale: { value: 1 }, uRadiusScale: { value: 1 } },
+    uniforms: { uTime: { value: 0 }, uPixelScale: { value: 1 }, uRadiusScale: { value: 1 }, uSpin: { value: new THREE.Vector2(1, 0) } },
     vertexShader: sparkVertex, fragmentShader: sparkFragment, transparent: true,
-    depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+    depthWrite: false, depthTest: false,
   }));
   points.frustumCulled = false;
   return points;

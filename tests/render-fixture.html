@@ -9,20 +9,32 @@
   const seconds = Number(query.get('seconds') ?? '2.1');
   const quality = query.get('quality') === 'low' ? 'low' : 'standard';
   const radius = Number(query.get('radius') ?? '160');
+  const seed = Number(query.get('seed') ?? '1234');
   if (query.get('light') === '1') document.body.style.backgroundColor = '#b5aa94';
   const result = document.querySelector('#result');
   class Capture extends ThreeFireballPrototype {
     capture(time) {
-      const cast={ from:{x:innerWidth*.22,y:innerHeight*.62}, to:{x:innerWidth*.64,y:innerHeight*.50},radius };
+      const cast={ from:{x:innerWidth*.22,y:innerHeight*.62}, to:{x:innerWidth*.64,y:innerHeight*.50},radius,seed };
       this.active=cast;
       try { this.resize(); this.draw(cast,time); } finally { this.active=null; }
     }
-    stats() { return {calls:this.renderer.info.render.calls,triangles:this.renderer.info.render.triangles,width:this.renderer.domElement.width,height:this.renderer.domElement.height}; }
+    stats() { return {calls:this.renderer.info.render.calls,triangles:this.renderer.info.render.triangles,width:this.renderer.domElement.width,height:this.renderer.domElement.height,
+      particles:this.particleCount, trail:this.trail.visible, burst:this.explosion.visible&&this.burst.visible,
+      dust:this.explosion.visible&&this.shock.visible, cloud:this.explosion.visible&&this.smoke.visible}; }
     finishGPU() { this.renderer.getContext().finish(); }
   }
   try {
     const fx = new Capture(document.querySelector('#root'),quality);
     await fx.ready();
+    window.addEventListener('pagehide',()=>fx.dispose(),{once:true});
+    if (query.get('play') === '1') {
+      const stages = [];
+      result.textContent = 'PLAYING';
+      await fx.play({x:innerWidth*.22,y:innerHeight*.62},{x:innerWidth*.64,y:innerHeight*.50},
+        ()=>stages.push('impact'),radius,()=>stages.push('started'),seed);
+      stages.push('finished');
+      result.textContent = 'FINISHED '+JSON.stringify({quality,seed,stages,...fx.stats()},null,2);
+    } else {
     fx.capture(seconds); fx.finishGPU();
     const times = [];
     if(query.get('bench')==='1') {
@@ -31,7 +43,8 @@
       }
     }
     const sorted=[...times].sort((a,b)=>a-b);
-    result.textContent = 'READY '+JSON.stringify({seconds,quality,radius,...fx.stats(),samples:times.length,submitAndGPUms:times.length?{mean:times.reduce((a,b)=>a+b,0)/times.length,p95:sorted[Math.floor(sorted.length*.95)]}:undefined},null,2);
-    window.addEventListener('pagehide',()=>fx.dispose(),{once:true});
+    // CPU submission timing is diagnostic only; it is not Owlbear FPS or a reliable GPU benchmark.
+    result.textContent = 'READY '+JSON.stringify({seconds,quality,radius,seed,...fx.stats(),samples:times.length,submitAndGPUms:times.length?{mean:times.reduce((a,b)=>a+b,0)/times.length,p95:sorted[Math.floor(sorted.length*.95)]}:undefined},null,2);
+    }
   } catch(error) { result.textContent='ERROR '+String(error); console.error(error); }
 </script></body></html>

@@ -78,7 +78,7 @@ async function run(): Promise<void> {
         if (closed || item.cancelled || item.ended || !active.has(item.cast.castId)) return;
         item.started = true;
         void stage(item.cast.castId, "started").catch(console.warn);
-      });
+      }, item.cast.seed);
       projectionTimer ??= setInterval(() => { void updateProjection(); }, 100);
       await result;
       if (!closed) await end(item, item.cancelled ? "cancelled" : "finished");

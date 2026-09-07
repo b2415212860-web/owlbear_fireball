@@ -128,9 +128,9 @@ function createFixture(t, options = {}) {
       this.currentQuality = quality === "low" ? "low" : "standard";
     }
     setProjection(from, to, radius) { this.projections.push({ from, to, radius }); }
-    play(from, to, onImpact, radius, onStarted) {
+    play(from, to, onImpact, radius, onStarted, seed) {
       const completion = deferred();
-      const play = { from, to, radius, onImpact, onStarted, completion, firstFrame: false };
+      const play = { from, to, radius, onImpact, onStarted, seed, completion, firstFrame: false };
       this.plays.push(play);
       this.pending = play;
       return completion.promise;
@@ -278,6 +278,7 @@ test("started acknowledges the renderer's first successful draw, then impact and
   assert.deepEqual(renderer.plays[0].from, { x: 220, y: 430 });
   assert.deepEqual(renderer.plays[0].to, { x: 620, y: 830 });
   assert.equal(renderer.plays[0].radius, 1200);
+  assert.equal(renderer.plays[0].seed, 1234, "Forward the shared cast seed, not a new client-side random seed");
   assert.deepEqual(f.stages("cast-1"), []);
   f.flushFrames();
   await settle();

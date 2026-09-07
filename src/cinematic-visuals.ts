@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { TAIL_DISSIPATION_SECONDS, BURST_END_SECONDS, DUST_START_SECONDS, DUST_END_SECONDS } from "./explosion-profile";
 
 // Small, spatially coherent turbulence. No full-screen buffers or postprocessing passes.
 const noise = `
@@ -86,9 +87,11 @@ export function makeFlameTrail(count: number): THREE.Mesh<THREE.InstancedBufferG
   geometry.instanceCount = count;
   const material = new THREE.ShaderMaterial({
     uniforms: { uFrom: { value: new THREE.Vector2() }, uTo: { value: new THREE.Vector2() },
-      uProgress: { value: 0 }, uTime: { value: 0 }, uSize: { value: 20 } },
+      uProgress: { value: 0 }, uTime: { value: 0 }, uSize: { value: 20 },
+      uAfterImpact: { value: 0 }, uSeed: { value: new THREE.Vector3() } },
     vertexShader: `
-      uniform vec2 uFrom,uTo; uniform float uProgress,uTime,uSize;
+      uniform vec2 uFrom,uTo; uniform float uProgress,uTime,uSize,uAfterImpact;
+      uniform vec3 uSeed;
       attribute float aAge; varying vec2 vUv; varying float vAge; varying float vAlpha;
       void main(){
         vUv=uv; vAge=aAge;
@@ -97,19 +100,23 @@ export function makeFlameTrail(count: number): THREE.Mesh<THREE.InstancedBufferG
         vec2 delta=uTo-uFrom;
         vec2 axis=delta/max(length(delta),.001); vec2 across=vec2(-axis.y,axis.x);
         vec2 center=mix(uFrom,uTo,eased)-axis*uSize*.28;
-        center+=across*sin(aAge*27.-uTime*9.)*uSize*aAge*.43;
-        float size=uSize*(1.75-aAge*1.15);
+        center+=across*sin(aAge*27.-uTime*9.+uSeed.x)*uSize*aAge*.43;
+        // Stop emission at impact; existing tongues swell and cool in place behind the target.
+        float spent=clamp(uAfterImpact/${TAIL_DISSIPATION_SECONDS},0.,1.);
+        center-=axis*uSize*spent*aAge*.3;
+        float size=uSize*(1.75-aAge*1.15)*(1.+spent*.45);
         vec2 local=axis*position.x*size*1.25+across*position.y*size;
-        vAlpha=(1.-aAge)*smoothstep(0.,.025,t);
+        vAlpha=(1.-aAge)*smoothstep(0.,.025,t)*(1.-smoothstep(0.,1.,spent));
         gl_Position=projectionMatrix*modelViewMatrix*vec4(center+local,1.,1.);
       }`,
     fragmentShader: `
-      uniform float uTime; varying vec2 vUv; varying float vAge,vAlpha; ${noise}
+      uniform float uTime,uAfterImpact; uniform vec3 uSeed;
+      varying vec2 vUv; varying float vAge,vAlpha; ${noise}
       void main(){
         vec2 p=(vUv-.5)*2.;
-        float n=fbm(vec3(p*2.5+vec2(uTime*-3.,vAge*7.),vAge*8.-uTime));
+        float n=fbm(vec3(p*2.5+vec2(uTime*-3.,vAge*7.),vAge*8.-uTime)+uSeed);
         float density=(1.-smoothstep(.23,.95,length(p)+(.5-n)*.5));
-        float heat=clamp(.88-vAge*.56+(n-.5)*.5,0.,1.);
+        float heat=clamp(.88-vAge*.56+(n-.5)*.5-uAfterImpact*1.7,0.,1.);
         float alpha=density*vAlpha*(.28+n*.25);
         gl_FragColor=vec4(flameColor(heat),alpha);
       }`,
@@ -123,44 +130,51 @@ export function makeFlameTrail(count: number): THREE.Mesh<THREE.InstancedBufferG
 /** Fast fire-front breakup at impact, followed by a distinct pressure/dust front. */
 export function makeDetonation(): THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial> {
   return new THREE.Mesh(new THREE.PlaneGeometry(320, 320), new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uReduced: { value: 0 } }, vertexShader: planeVertex,
+    uniforms: { uTime: { value: 0 }, uReduced: { value: 0 }, uSeed: { value: new THREE.Vector3() } }, vertexShader: planeVertex,
     fragmentShader: `
-      uniform float uTime,uReduced; varying vec2 vUv; ${noise}
+      uniform float uTime,uReduced; uniform vec3 uSeed; varying vec2 vUv; ${noise}
       void main(){
         vec2 p=(vUv-.5)*2.; float r=length(p);
         float t=max(0.,uTime);
-        float n=fbm(vec3(p*6.,t*2.1));
-        float radius=.08+.61*(1.-exp(-t*15.));
-        float boundary=radius+(n-.5)*.2;
-        float body=1.-smoothstep(boundary-.17,boundary+.045,r);
-        float heat=clamp(.77+n*.42-r*.25-t*.7,0.,1.);
-        float flash=exp(-r*r*42.)*exp(-t*25.)*(1.-uReduced*.8);
-        float fade=1.-smoothstep(.17,.64,t);
-        vec3 color=mix(flameColor(heat),vec3(1.,.98,.88),flash);
-        gl_FragColor=vec4(color,clamp(body*fade+flash*.7,0.,.97));
+        float expansion=1.-exp(-max(0.,t-.025)*18.);
+        float radius=.055+.63*expansion;
+        // Advect the texture with the expanding gas instead of a uniformly scaling disc.
+        vec2 gas=p/max(.18,radius);
+        float n=fbm(vec3(gas*3.4,-t*2.7)+uSeed);
+        float fold=noise3(vec3(gas*8.,t*1.8)+uSeed.yzx);
+        float boundary=radius+(n-.5)*.30*expansion;
+        float body=1.-smoothstep(boundary-.10,boundary+.035,r);
+        float torn=smoothstep(.20+t*.30,.53+t*.23,n+fold*.21);
+        float heat=clamp(.62+n*.66-r*.33-t*.65,0.,1.);
+        float flash=exp(-r*r*90.)*exp(-t*38.)*(1.-uReduced*.85);
+        float fade=1.-smoothstep(.18,${BURST_END_SECONDS},t);
+        vec3 color=mix(flameColor(heat),vec3(1.,.99,.9),flash);
+        float flame=body*mix(1.,torn,smoothstep(.055,.32,t))*fade;
+        gl_FragColor=vec4(color,clamp(flame+flash*.9,0.,.98));
       }`, transparent: true, depthWrite: false, depthTest: false,
   }));
 }
 
 export function makePressureWave(): THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial> {
   return new THREE.Mesh(new THREE.PlaneGeometry(352, 352), new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uReduced: { value: 0 } }, vertexShader: planeVertex,
+    uniforms: { uTime: { value: 0 }, uReduced: { value: 0 }, uSeed: { value: new THREE.Vector3() } }, vertexShader: planeVertex,
     fragmentShader: `
-      uniform float uTime,uReduced; varying vec2 vUv; ${noise}
+      uniform float uTime,uReduced; uniform vec3 uSeed; varying vec2 vUv; ${noise}
       void main(){
         vec2 p=(vUv-.5)*2.; float r=length(p);
-        float t=max(0.,uTime-.045);
-        float n=noise3(vec3(p*18.,0.));
-        float front=.1+.84*(1.-exp(-t*6.));
-        float d=r-front-(n-.5)*.015;
-        float pressure=(1.-smoothstep(.005,.019,abs(d)))*.42;
-        float dust=(1.-smoothstep(.02,.10,abs(d+.036)))*(.28+n*.28);
-        float fade=smoothstep(0.,.035,t)*(1.-smoothstep(.23,1.0,t));
-        float heat=exp(-t*9.);
-        vec3 color=mix(vec3(.50,.44,.36),vec3(1.,.84,.56),heat);
-        color=mix(color,vec3(.88,.9,.87),pressure);
-        float glow=exp(-r*r*5.)*exp(-uTime*7.)*.16;
-        gl_FragColor=vec4(color,((pressure+dust)*fade+glow)*(1.-uReduced*.65));
+        float t=max(0.,uTime-${DUST_START_SECONDS});
+        float front=.28+.61*(1.-exp(-t*7.));
+        vec2 direction=p/max(r,.001);
+        float sectors=noise3(vec3(direction*4.2,0.)+uSeed);
+        float grains=fbm(vec3(p*17.-direction*t*3.,t*.8)+uSeed);
+        float d=r-front-(sectors-.5)*.105-(grains-.5)*.045;
+        float pressure=(1.-smoothstep(.003,.014,abs(d)))*.16*exp(-t*9.);
+        float dust=(1.-smoothstep(.025,.115,abs(d+.036)));
+        dust*=smoothstep(.26,.64,sectors)*smoothstep(.23,.7,grains)*.87;
+        float fade=smoothstep(0.,.055,t)*(1.-smoothstep(.42,${DUST_END_SECONDS},uTime));
+        vec3 color=mix(vec3(.23,.205,.18),vec3(.59,.51,.40),grains);
+        color=mix(color,vec3(.86,.64,.34),exp(-t*8.)*.24);
+        gl_FragColor=vec4(color,(dust+pressure)*fade*(1.-uReduced*.65));
       }`, transparent: true, depthWrite: false, depthTest: false,
   }));
 }
